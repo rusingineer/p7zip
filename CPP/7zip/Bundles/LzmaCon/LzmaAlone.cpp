@@ -2,7 +2,9 @@
 
 #include "StdAfx.h"
 
-#include <stdio.h>
+// #include <stdio.h>
+
+#include "../../../../C/CpuArch.h"
 
 #if (defined(_WIN32) || defined(OS2) || defined(MSDOS)) && !defined(UNDER_CE)
 #include <fcntl.h>
@@ -39,14 +41,16 @@
 #include "../../UI/Console/BenchCon.h"
 #include "../../UI/Console/ConsoleClose.h"
 
+bool g_LargePagesMode = false;
+
 using namespace NCommandLineParser;
 
 static const unsigned kDictSizeLog = 24;
 
-static const char *kCopyrightString = "\nLZMA " MY_VERSION_COPYRIGHT_DATE "\n\n";
+#define kCopyrightString "\nLZMA " MY_VERSION_CPU " : " MY_COPYRIGHT_DATE "\n\n"
 
-static const char *kHelpString =
-    "Usage:  LZMA <command> [inputFile] [outputFile] [<switches>...]\n"
+static const char * const kHelpString =
+    "Usage:  lzma <command> [inputFile] [outputFile] [<switches>...]\n"
     "\n"
     "<command>\n"
     "  e : Encode file\n"
@@ -67,9 +71,9 @@ static const char *kHelpString =
     "  -so    : write data to stdout\n";
 
 
-static const char *kCantAllocate = "Can not allocate memory";
-static const char *kReadError = "Read error";
-static const char *kWriteError = "Write error";
+static const char * const kCantAllocate = "Cannot allocate memory";
+static const char * const kReadError = "Read error";
+static const char * const kWriteError = "Write error";
 
 
 namespace NKey {
@@ -95,27 +99,50 @@ enum Enum
 };
 }
 
+#define SWFRM_3(t, mu, mi) t, mu, mi, NULL
+
+#define SWFRM_1(t) SWFRM_3(t, false, 0)
+#define SWFRM_SIMPLE SWFRM_1(NSwitchType::kSimple)
+#define SWFRM_STRING SWFRM_1(NSwitchType::kString)
+
+#define SWFRM_STRING_SINGL(mi) SWFRM_3(NSwitchType::kString, false, mi)
+
 static const CSwitchForm kSwitchForms[] =
 {
-  { "?",  NSwitchType::kSimple, false },
-  { "H",  NSwitchType::kSimple, false },
-  { "MM", NSwitchType::kString, false, 1 },
-  { "X", NSwitchType::kString, false, 1 },
-  { "A", NSwitchType::kString, false, 1 },
-  { "D", NSwitchType::kString, false, 1 },
-  { "FB", NSwitchType::kString, false, 1 },
-  { "MC", NSwitchType::kString, false, 1 },
-  { "LC", NSwitchType::kString, false, 1 },
-  { "LP", NSwitchType::kString, false, 1 },
-  { "PB", NSwitchType::kString, false, 1 },
-  { "MF", NSwitchType::kString, false, 1 },
-  { "MT", NSwitchType::kString, false, 0 },
-  { "EOS", NSwitchType::kSimple, false },
-  { "SI",  NSwitchType::kSimple, false },
-  { "SO",  NSwitchType::kSimple, false },
+  { "?",  SWFRM_SIMPLE },
+  { "H",  SWFRM_SIMPLE },
+  { "MM", SWFRM_STRING_SINGL(1) },
+  { "X", SWFRM_STRING_SINGL(1) },
+  { "A", SWFRM_STRING_SINGL(1) },
+  { "D", SWFRM_STRING_SINGL(1) },
+  { "FB", SWFRM_STRING_SINGL(1) },
+  { "MC", SWFRM_STRING_SINGL(1) },
+  { "LC", SWFRM_STRING_SINGL(1) },
+  { "LP", SWFRM_STRING_SINGL(1) },
+  { "PB", SWFRM_STRING_SINGL(1) },
+  { "MF", SWFRM_STRING_SINGL(1) },
+  { "MT", SWFRM_STRING },
+  { "EOS", SWFRM_SIMPLE },
+  { "SI",  SWFRM_SIMPLE },
+  { "SO",  SWFRM_SIMPLE },
   { "F86",  NSwitchType::kChar, false, 0, "+" }
 };
 
+
+static void Convert_UString_to_AString(const UString &s, AString &temp)
+{
+  int codePage = CP_OEMCP;
+  /*
+  int g_CodePage = -1;
+  int codePage = g_CodePage;
+  if (codePage == -1)
+    codePage = CP_OEMCP;
+  if (codePage == CP_UTF8)
+    ConvertUnicodeToUTF8(s, temp);
+  else
+  */
+    UnicodeStringToMultiByte2(temp, s, (UINT)codePage);
+}
 
 static void PrintErr(const char *s)
 {
@@ -135,10 +162,12 @@ static void PrintError(const char *s)
   PrintErr_LF(s);
 }
 
-static void PrintError2(const char *s1, const wchar_t *s2)
+static void PrintError2(const char *s1, const UString &s2)
 {
   PrintError(s1);
-  PrintErr_LF(GetOemString(s2));
+  AString a;
+  Convert_UString_to_AString(s2, a);
+  PrintErr_LF(a);
 }
 
 static void PrintError_int(const char *s, int code)
@@ -208,7 +237,7 @@ public:
 
 #define BACK_STR \
 "\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b"
-static const char *kBackSpaces =
+static const char * const kBackSpaces =
 BACK_STR
 "                                                                "
 BACK_STR;
@@ -243,6 +272,7 @@ STDMETHODIMP CProgressPrint::SetRatioInfo(const UInt64 *inSize, const UInt64 *ou
 }
 
 
+MY_ATTR_NORETURN
 static void IncorrectCommand()
 {
   throw "Incorrect command";
@@ -293,12 +323,14 @@ static int Error_HRESULT(const char *s, HRESULT res)
   return 1;
 }
 
+#if defined(_UNICODE) && !defined(_WIN64) && !defined(UNDER_CE)
 #define NT_CHECK_FAIL_ACTION PrintError("Unsupported Windows version"); return 1;
+#endif
 
 static void AddProp(CObjectVector<CProperty> &props2, const char *name, const wchar_t *val)
 {
   CProperty &prop = props2.AddNew();
-  prop.Name.SetFromAscii(name);
+  prop.Name = name;
   prop.Value = val;
 }
 
@@ -321,11 +353,11 @@ static int main2(int numArgs, const char *args[])
   UStringVector commandStrings;
   for (int i = 1; i < numArgs; i++)
     commandStrings.Add(MultiByteToUnicodeString(args[i]));
-
-  CParser parser(ARRAY_SIZE(kSwitchForms));
+  
+  CParser parser;
   try
   {
-    if (!parser.ParseStrings(kSwitchForms, commandStrings))
+    if (!parser.ParseStrings(kSwitchForms, ARRAY_SIZE(kSwitchForms), commandStrings))
     {
       PrintError2(parser.ErrorMessage, parser.ErrorLine);
       return 1;
@@ -358,7 +390,7 @@ static int main2(int numArgs, const char *args[])
   CObjectVector<CProperty> props2;
   bool dictDefined = false;
   UInt32 dict = (UInt32)(Int32)-1;
-
+  
   if (parser[NKey::kDict].ThereIs)
   {
     UInt32 dictLog;
@@ -368,22 +400,22 @@ static int main2(int numArgs, const char *args[])
     dictDefined = true;
     AddProp(props2, "d", s);
   }
-
+  
   if (parser[NKey::kLevel].ThereIs)
   {
     const UString &s = parser[NKey::kLevel].PostStrings[0];
     /* UInt32 level = */ GetNumber(s);
     AddProp(props2, "x", s);
   }
-
-  UString mf = L"BT4";
+  
+  UString mf ("BT4");
   if (parser[NKey::kMatchFinder].ThereIs)
     mf = parser[NKey::kMatchFinder].PostStrings[0];
 
   UInt32 numThreads = (UInt32)(Int32)-1;
 
   #ifndef _7ZIP_ST
-
+  
   if (parser[NKey::kMultiThread].ThereIs)
   {
     const UString &s = parser[NKey::kMultiThread].PostStrings[0];
@@ -393,10 +425,10 @@ static int main2(int numArgs, const char *args[])
       numThreads = GetNumber(s);
     AddProp(props2, "mt", s);
   }
-
+  
   #endif
 
-
+  
   if (parser[NKey::kMethod].ThereIs)
   {
     const UString &s = parser[NKey::kMethod].PostStrings[0];
@@ -412,9 +444,9 @@ static int main2(int numArgs, const char *args[])
       numIterations = GetNumber(params[paramIndex++]);
     if (params.Size() != paramIndex)
       IncorrectCommand();
-
+  
     HRESULT res = BenchCon(props2, numIterations, stdout);
-
+    
     if (res == S_OK)
       return 0;
     return Error_HRESULT("Benchmark error", res);
@@ -432,7 +464,7 @@ static int main2(int numArgs, const char *args[])
     numThreads = 1;
 
   bool encodeMode = false;
-
+  
   if (StringsAreEqualNoCase_Ascii(command, "e"))
     encodeMode = true;
   else if (!StringsAreEqualNoCase_Ascii(command, "d"))
@@ -440,7 +472,7 @@ static int main2(int numArgs, const char *args[])
 
   CMyComPtr<ISequentialInStream> inStream;
   CInFileStream *inStreamSpec = NULL;
-
+  
   if (stdInMode)
   {
     inStream = new CStdInFileStream;
@@ -453,14 +485,14 @@ static int main2(int numArgs, const char *args[])
     inStream = inStreamSpec;
     if (!inStreamSpec->Open(us2fs(inputName)))
     {
-      PrintError2("can not open input file", inputName);
+      PrintError2("Cannot open input file", inputName);
       return 1;
     }
   }
 
   CMyComPtr<ISequentialOutStream> outStream;
   COutFileStream *outStreamSpec = NULL;
-
+  
   if (stdOutMode)
   {
     outStream = new CStdOutFileStream;
@@ -473,18 +505,18 @@ static int main2(int numArgs, const char *args[])
     outStream = outStreamSpec;
     if (!outStreamSpec->Create(us2fs(outputName), true))
     {
-      PrintError2("can not open output file", outputName);
+      PrintError2("Cannot open output file", outputName);
       return 1;
     }
   }
 
   bool fileSizeDefined = false;
   UInt64 fileSize = 0;
-
+  
   if (inStreamSpec)
   {
     if (!inStreamSpec->File.GetLength(fileSize))
-      throw "Can not get file length";
+      throw "Cannot get file length";
     fileSizeDefined = true;
     if (!stdOutMode)
       Print_Size("Input size:  ", fileSize);
@@ -511,7 +543,7 @@ static int main2(int numArgs, const char *args[])
        You can use xz format instead, if you want to use filters */
 
     if (parser[NKey::kEOS].ThereIs || stdInMode)
-      throw "Can not use stdin in this mode";
+      throw "Cannot use stdin in this mode";
 
     size_t inSize = (size_t)fileSize;
 
@@ -519,27 +551,27 @@ static int main2(int numArgs, const char *args[])
       throw "File is too big";
 
     Byte *inBuffer = NULL;
-
+    
     if (inSize != 0)
     {
       inBuffer = (Byte *)MyAlloc((size_t)inSize);
       if (!inBuffer)
         throw kCantAllocate;
     }
-
+    
     if (ReadStream_FAIL(inStream, inBuffer, inSize) != S_OK)
-      throw "Can not read";
+      throw "Cannot read";
 
     Byte *outBuffer = NULL;
     size_t outSize;
-
+    
     if (encodeMode)
     {
       // we allocate 105% of original size for output buffer
       UInt64 outSize64 = fileSize / 20 * 21 + (1 << 16);
 
       outSize = (size_t)outSize64;
-
+      
       if (outSize != outSize64)
         throw "File is too big";
 
@@ -549,10 +581,10 @@ static int main2(int numArgs, const char *args[])
         if (!outBuffer)
           throw kCantAllocate;
       }
-
+      
       int res = Lzma86_Encode(outBuffer, &outSize, inBuffer, inSize,
           5, dict, parser[NKey::kFilter86].PostCharIndex == 0 ? SZ_FILTER_YES : SZ_FILTER_AUTO);
-
+  
       if (res != 0)
       {
         PrintError_int("Encode error", (int)res);
@@ -562,10 +594,10 @@ static int main2(int numArgs, const char *args[])
     else
     {
       UInt64 outSize64;
-
+      
       if (Lzma86_GetUnpackSize(inBuffer, inSize, &outSize64) != 0)
         throw "data error";
-
+      
       outSize = (size_t)outSize64;
       if (outSize != outSize64)
         throw "Unpack size is too big";
@@ -575,9 +607,9 @@ static int main2(int numArgs, const char *args[])
         if (!outBuffer)
           throw kCantAllocate;
       }
-
+      
       int res = Lzma86_Decode(outBuffer, &outSize, inBuffer, &inSize);
-
+      
       if (inSize != (size_t)fileSize)
         throw "incorrect processed size";
       if (res != 0)
@@ -586,10 +618,10 @@ static int main2(int numArgs, const char *args[])
         return 1;
       }
     }
-
+    
     if (WriteStream(outStream, outBuffer, outSize) != S_OK)
       throw kWriteError;
-
+    
     MyFree(outBuffer);
     MyFree(inBuffer);
   }
@@ -619,7 +651,7 @@ static int main2(int numArgs, const char *args[])
     bool mcDefined = false;
 
     bool eos = parser[NKey::kEOS].ThereIs || stdInMode;
-
+ 
     ParseUInt32(parser, NKey::kAlgo, algo);
     ParseUInt32(parser, NKey::kFb, fb);
     ParseUInt32(parser, NKey::kLc, lc);
@@ -629,7 +661,7 @@ static int main2(int numArgs, const char *args[])
     mcDefined = parser[NKey::kMc].ThereIs;
     if (mcDefined)
       mc = GetNumber(parser[NKey::kMc].PostStrings[0]);
-
+    
     const PROPID propIDs[] =
     {
       NCoderPropID::kDictionarySize,
@@ -695,7 +727,7 @@ static int main2(int numArgs, const char *args[])
       if (WriteStream(outStream, temp, 8) != S_OK)
         throw kWriteError;
     }
-
+  
     res = encoder->Code(inStream, outStream, NULL, NULL, progress);
     if (progressSpec)
       progressSpec->ClosePrint();
@@ -704,7 +736,7 @@ static int main2(int numArgs, const char *args[])
       return Error_HRESULT("Encoding error", res);
 
     UInt64 processedSize = encoderSpec->GetInputProcessedSize();
-
+    
     if (fileSizeWasUsed && processedSize != fileSize)
       throw "Incorrect size of processed data";
   }
@@ -712,18 +744,18 @@ static int main2(int numArgs, const char *args[])
   {
     NCompress::NLzma::CDecoder *decoderSpec = new NCompress::NLzma::CDecoder;
     CMyComPtr<ICompressCoder> decoder = decoderSpec;
-
+    
     decoderSpec->FinishStream = true;
-
+    
     const unsigned kPropertiesSize = 5;
     Byte header[kPropertiesSize + 8];
 
     if (ReadStream_FALSE(inStream, header, kPropertiesSize + 8) != S_OK)
       throw kReadError;
-
+    
     if (decoderSpec->SetDecoderProperties2(header, kPropertiesSize) != S_OK)
       throw "SetDecoderProperties error";
-
+    
     UInt64 unpackSize = 0;
     for (int i = 0; i < 8; i++)
       unpackSize |= ((UInt64)header[kPropertiesSize + i]) << (8 * i);
@@ -743,7 +775,7 @@ static int main2(int numArgs, const char *args[])
       }
       return Error_HRESULT("Decoding error", res);
     }
-
+    
     if (unpackSizeDefined && unpackSize != decoderSpec->GetOutputProcessedSize())
       throw "incorrect uncompressed size in header";
   }

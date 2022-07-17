@@ -3,7 +3,7 @@
 #include "StdAfx.h"
 
 #include "../../../Common/ComTry.h"
-#include "../../../Common/IntToString.h"
+#include "../../../Common/MyLinux.h"
 #include "../../../Common/StringConvert.h"
 
 #include "../../../Windows/PropVariant.h"
@@ -144,7 +144,7 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
       prop = v;
       break;
     }
-
+    
     case kpidError:
     {
       AString s;
@@ -176,12 +176,10 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
     {
       case kpidPath:
       {
-        AString s = "[BOOT]" STRING_PATH_SEPARATOR;
+        AString s ("[BOOT]" STRING_PATH_SEPARATOR);
         if (_archive.BootEntries.Size() != 1)
         {
-          char temp[16];
-          ConvertUInt32ToString(index + 1, temp);
-          s += temp;
+          s.Add_UInt32(index + 1);
           s += '-';
         }
         s += be.GetName();
@@ -212,11 +210,11 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
 
           if (s.Len() >= 2 && s[s.Len() - 2] == ';' && s.Back() == '1')
             s.DeleteFrom(s.Len() - 2);
-
+          
           if (!s.IsEmpty() && s.Back() == L'.')
             s.DeleteBack();
 
-          NItemName::ConvertToOSName2(s);
+          NItemName::ReplaceToOsSlashes_Remove_TailSlash(s);
           prop = s;
         }
         break;
@@ -224,16 +222,15 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
       case kpidSymLink:
         if (_archive.IsSusp)
         {
-          UString s;
           UInt32 mode;
           if (item.GetPx(_archive.SuspSkipSize, k_Px_Mode, mode))
           {
-            if (((mode >> 12) & 0xF) == 10)
+            if (MY_LIN_S_ISLNK(mode))
             {
               AString s8;
               if (item.GetSymLink(_archive.SuspSkipSize, s8))
               {
-                s = MultiByteToUnicodeString(s8, CP_OEMCP);
+                UString s = MultiByteToUnicodeString(s8, CP_OEMCP);
                 prop = s;
               }
             }
@@ -267,7 +264,7 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
         }
         break;
       }
-
+      
       case kpidIsDir: prop = item.IsDir(); break;
       case kpidSize:
       case kpidPackSize:
@@ -338,7 +335,7 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
 
   UInt64 currentTotalSize = 0;
   UInt64 currentItemSize;
-
+  
   NCompress::CCopyCoder *copyCoderSpec = new NCompress::CCopyCoder();
   CMyComPtr<ICompressCoder> copyCoder = copyCoderSpec;
 
@@ -360,7 +357,7 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
         NExtract::NAskMode::kTest :
         NExtract::NAskMode::kExtract;
     UInt32 index = allFilesMode ? i : indices[i];
-
+    
     RINOK(extractCallback->GetStream(index, &realOutStream, askMode));
 
     UInt64 blockIndex;
@@ -384,7 +381,7 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
       currentItemSize = _archive.GetBootItemSize(bootIndex);
       blockIndex = be.LoadRBA;
     }
-
+   
 
     if (!testMode && !realOutStream)
       continue;
@@ -436,7 +433,7 @@ STDMETHODIMP CHandler::GetStream(UInt32 index, ISequentialInStream **stream)
   *stream = 0;
   UInt64 blockIndex;
   UInt64 currentItemSize;
-
+  
   if (index < _archive.Refs.Size())
   {
     const CRef &ref = _archive.Refs[index];
@@ -448,9 +445,9 @@ STDMETHODIMP CHandler::GetStream(UInt32 index, ISequentialInStream **stream)
     {
       CExtentsStream *extentStreamSpec = new CExtentsStream();
       CMyComPtr<ISequentialInStream> extentStream = extentStreamSpec;
-
+      
       extentStreamSpec->Stream = _stream;
-
+      
       UInt64 virtOffset = 0;
       for (UInt32 i = 0; i < ref.NumExtents; i++)
       {
@@ -473,7 +470,7 @@ STDMETHODIMP CHandler::GetStream(UInt32 index, ISequentialInStream **stream)
       *stream = extentStream.Detach();
       return S_OK;
     }
-
+    
     currentItemSize = item.Size;
     blockIndex = item.ExtentLocation;
   }
@@ -484,7 +481,7 @@ STDMETHODIMP CHandler::GetStream(UInt32 index, ISequentialInStream **stream)
     currentItemSize = _archive.GetBootItemSize(bootIndex);
     blockIndex = be.LoadRBA;
   }
-
+  
   return CreateLimitedInStream(_stream, (UInt64)blockIndex * kBlockSize, currentItemSize, stream);
   COM_TRY_END
 }

@@ -23,7 +23,9 @@ const int kLenIdNeedInit = -2;
 
 class CCoder:
   public ICompressCoder,
+  public ICompressSetFinishMode,
   public ICompressGetInStreamProcessedSize,
+  public ICompressReadUnusedFromInBuf,
   #ifndef NO_READ_FROM_CODER
   public ICompressSetInStream,
   public ICompressSetOutStreamSize,
@@ -48,17 +50,24 @@ class CCoder:
   bool _deflate64Mode;
   bool _keepHistory;
   bool _needFinishInput;
-
+  
   bool _needInitInStream;
   bool _needReadTable;
   Int32 _remainLen;
   UInt32 _rep0;
 
+  bool _outSizeDefined;
+  UInt64 _outSize;
+  UInt64 _outStartPos;
+
+  void SetOutStreamSizeResume(const UInt64 *outSize);
+  UInt64 GetOutProcessedCur() const { return m_OutWindowStream.GetProcessedSize() - _outStartPos; }
+
   UInt32 ReadBits(unsigned numBits);
 
   bool DecodeLevels(Byte *levels, unsigned numSymbols);
   bool ReadTables();
-
+  
   HRESULT Flush() { return m_OutWindowStream.Flush(); }
   class CCoderReleaser
   {
@@ -74,7 +83,7 @@ class CCoder:
   };
   friend class CCoderReleaser;
 
-  HRESULT CodeSpec(UInt32 curSize, bool finishInputStream);
+  HRESULT CodeSpec(UInt32 curSize, bool finishInputStream, UInt32 inputProgressLimit = 0);
 public:
   bool ZlibMode;
   Byte ZlibFooter[4];
@@ -90,47 +99,41 @@ public:
   bool IsFinished() const { return _remainLen == kLenIdFinished;; }
   bool IsFinalBlock() const { return m_FinalBlock; }
 
-  HRESULT CodeReal(ISequentialOutStream *outStream,
-      const UInt64 *outSize, ICompressProgressInfo *progress);
+  HRESULT CodeReal(ISequentialOutStream *outStream, ICompressProgressInfo *progress);
+
+  MY_QUERYINTERFACE_BEGIN2(ICompressCoder)
+  MY_QUERYINTERFACE_ENTRY(ICompressSetFinishMode)
+  MY_QUERYINTERFACE_ENTRY(ICompressGetInStreamProcessedSize)
+  MY_QUERYINTERFACE_ENTRY(ICompressReadUnusedFromInBuf)
 
   #ifndef NO_READ_FROM_CODER
-  MY_UNKNOWN_IMP5(
-      ICompressCoder,
-      ICompressGetInStreamProcessedSize,
-      ICompressSetInStream,
-      ICompressSetOutStreamSize,
-      ISequentialInStream
-      )
-  #else
-  MY_UNKNOWN_IMP2(
-      ICompressCoder,
-      ICompressGetInStreamProcessedSize)
+  MY_QUERYINTERFACE_ENTRY(ICompressSetInStream)
+  MY_QUERYINTERFACE_ENTRY(ICompressSetOutStreamSize)
+  MY_QUERYINTERFACE_ENTRY(ISequentialInStream)
   #endif
+
+  MY_QUERYINTERFACE_END
+  MY_ADDREF_RELEASE
+
 
   STDMETHOD(Code)(ISequentialInStream *inStream, ISequentialOutStream *outStream,
       const UInt64 *inSize, const UInt64 *outSize, ICompressProgressInfo *progress);
 
+  STDMETHOD(SetFinishMode)(UInt32 finishMode);
+  STDMETHOD(GetInStreamProcessedSize)(UInt64 *value);
+  STDMETHOD(ReadUnusedFromInBuf)(void *data, UInt32 size, UInt32 *processedSize);
+
   STDMETHOD(SetInStream)(ISequentialInStream *inStream);
   STDMETHOD(ReleaseInStream)();
   STDMETHOD(SetOutStreamSize)(const UInt64 *outSize);
-
+  
   #ifndef NO_READ_FROM_CODER
   STDMETHOD(Read)(void *data, UInt32 size, UInt32 *processedSize);
   #endif
 
-  STDMETHOD(CodeResume)(ISequentialOutStream *outStream, const UInt64 *outSize, ICompressProgressInfo *progress);
+  HRESULT CodeResume(ISequentialOutStream *outStream, const UInt64 *outSize, ICompressProgressInfo *progress);
 
-  HRESULT InitInStream(bool needInit)
-  {
-    if (!m_InBitStream.Create(1 << 17))
-      return E_OUTOFMEMORY;
-    if (needInit)
-    {
-      m_InBitStream.Init();
-      _needInitInStream = false;
-    }
-    return S_OK;
-  }
+  HRESULT InitInStream(bool needInit);
 
   void AlignToByte() { m_InBitStream.AlignToByte(); }
   Byte ReadAlignedByte();
@@ -141,11 +144,11 @@ public:
   }
   bool InputEofError() const { return m_InBitStream.ExtraBitsWereRead(); }
 
+  // size of used real data from input stream
   UInt64 GetStreamSize() const { return m_InBitStream.GetStreamSize(); }
-  UInt64 GetInputProcessedSize() const { return m_InBitStream.GetProcessedSize(); }
 
-  // IGetInStreamProcessedSize
-  STDMETHOD(GetInStreamProcessedSize)(UInt64 *value);
+  // size of virtual input stream processed
+  UInt64 GetInputProcessedSize() const { return m_InBitStream.GetProcessedSize(); }
 };
 
 class CCOMCoder     : public CCoder { public: CCOMCoder(): CCoder(false) {} };

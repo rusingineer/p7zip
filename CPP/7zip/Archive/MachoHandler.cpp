@@ -35,10 +35,11 @@ namespace NMacho {
 
 #define CPU_SUBTYPE_I386_ALL 3
 
-#define CPU_TYPE_PPC64 (CPU_ARCH_ABI64 | CPU_TYPE_PPC)
+// #define CPU_TYPE_PPC64 (CPU_ARCH_ABI64 | CPU_TYPE_PPC)
 #define CPU_TYPE_AMD64 (CPU_ARCH_ABI64 | CPU_TYPE_386)
+#define CPU_TYPE_ARM64 (CPU_ARCH_ABI64 | CPU_TYPE_ARM)
 
-#define CPU_SUBTYPE_LIB64 (1 << 31)
+#define CPU_SUBTYPE_LIB64 ((UInt32)1 << 31)
 
 #define CPU_SUBTYPE_POWERPC_970 100
 
@@ -60,6 +61,8 @@ static const char * const k_PowerPc_SubTypes[] =
 
 static const CUInt32PCharPair g_CpuPairs[] =
 {
+  { CPU_TYPE_AMD64, "x64" },
+  { CPU_TYPE_ARM64, "ARM64" },
   { CPU_TYPE_386, "x86" },
   { CPU_TYPE_ARM, "ARM" },
   { CPU_TYPE_SPARC, "SPARC" },
@@ -168,7 +171,7 @@ static const CUInt32PCharPair g_Flags[] =
   {  8, "LOC_RELOC" }
 };
 
-static const int kNameSize = 16;
+static const unsigned kNameSize = 16;
 
 struct CSegment
 {
@@ -255,16 +258,16 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
       AString s;
       char temp[16];
       UInt32 cpu = _cpuType & ~(UInt32)CPU_ARCH_ABI64;
-      if (_cpuType == CPU_TYPE_AMD64)
-        s = "x64";
-      else
+      UInt32 flag64 = _cpuType & (UInt32)CPU_ARCH_ABI64;
       {
         const char *n = NULL;
         for (unsigned i = 0; i < ARRAY_SIZE(g_CpuPairs); i++)
         {
           const CUInt32PCharPair &pair = g_CpuPairs[i];
-          if (pair.Value == cpu)
+          if (pair.Value == cpu || pair.Value == _cpuType)
           {
+            if (pair.Value == _cpuType)
+              flag64 = 0;
             n = pair.Name;
             break;
           }
@@ -275,11 +278,11 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
           n = temp;
         }
         s = n;
-
-        if (_cpuType & CPU_ARCH_ABI64)
+       
+        if (flag64 != 0)
           s += " 64-bit";
-        else if (_cpuSubType & CPU_SUBTYPE_LIB64)
-          s += " 64-bit lib";
+        else if ((_cpuSubType & CPU_SUBTYPE_LIB64) && _cpuType != CPU_TYPE_AMD64)
+          s += " 64-bit-lib";
       }
       UInt32 t = _cpuSubType & ~(UInt32)CPU_SUBTYPE_LIB64;
       if (t != 0 && (t != CPU_SUBTYPE_I386_ALL || cpu != CPU_TYPE_386))
@@ -306,8 +309,8 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
     case kpidCharacts:
     {
       // TYPE_TO_PROP(g_FileTypes, _type, prop); break;
-      AString res = TypeToString(g_FileTypes, ARRAY_SIZE(g_FileTypes), _type);
-      AString s = FlagsToString(g_ArcFlags, ARRAY_SIZE(g_ArcFlags), _flags);
+      AString res (TypeToString(g_FileTypes, ARRAY_SIZE(g_FileTypes), _type));
+      AString s (FlagsToString(g_ArcFlags, ARRAY_SIZE(g_ArcFlags), _flags));
       if (!s.IsEmpty())
       {
         res.Add_Space();
@@ -345,20 +348,9 @@ static AString GetName(const char *name)
   char res[kNameSize + 1];
   memcpy(res, name, kNameSize);
   res[kNameSize] = 0;
-  return res;
+  return (AString)res;
 }
 
-static AString SectFlagsToString(UInt32 flags)
-{
-  AString res = TypeToString(g_SectTypes, ARRAY_SIZE(g_SectTypes), flags & SECT_TYPE_MASK);
-  AString s = FlagsToString(g_Flags, ARRAY_SIZE(g_Flags), flags & SECT_ATTR_MASK);
-  if (!s.IsEmpty())
-  {
-    res.Add_Space();
-    res += s;
-  }
-  return res;
-}
 
 STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *value)
 {
@@ -369,7 +361,7 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
   {
     case kpidPath:
     {
-      AString s = GetName(_segments[item.SegmentIndex].Name);
+      AString s (GetName(_segments[item.SegmentIndex].Name));
       if (!item.IsDummy)
         s += GetName(item.Name);
       prop = MultiByteToUnicodeString(s);
@@ -377,7 +369,19 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
     }
     case kpidSize:  /* prop = (UInt64)item.VSize; break; */
     case kpidPackSize:  prop = (UInt64)item.GetPackSize(); break;
-    case kpidCharacts:  if (!item.IsDummy) prop = SectFlagsToString(item.Flags); break;
+    case kpidCharacts:
+      if (!item.IsDummy)
+      {
+        AString res (TypeToString(g_SectTypes, ARRAY_SIZE(g_SectTypes), item.Flags & SECT_TYPE_MASK));
+        AString s (FlagsToString(g_Flags, ARRAY_SIZE(g_Flags), item.Flags & SECT_ATTR_MASK));
+        if (!s.IsEmpty())
+        {
+          res.Add_Space();
+          res += s;
+        }
+        prop = res;
+      }
+      break;
     case kpidOffset:  prop = item.Pa; break;
     case kpidVa:  prop = item.Va; break;
   }
@@ -385,6 +389,7 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
   return S_OK;
   COM_TRY_END
 }
+
 
 HRESULT CHandler::Open2(ISequentialInStream *stream)
 {
@@ -401,6 +406,9 @@ HRESULT CHandler::Open2(ISequentialInStream *stream)
     case 0xFEEDFACF:  be = false; mode64 = true; break;
     default: return S_FALSE;
   }
+  
+  _mode64 = mode64;
+  _be = be;
 
   UInt32 numCommands = Get32(header + 0x10, be);
   UInt32 commandsSize = Get32(header + 0x14, be);
@@ -479,7 +487,7 @@ HRESULT CHandler::Open2(ISequentialInStream *stream)
             _totalSize = totalSize;
         }
       }
-
+      
       CSegment seg;
       memcpy(seg.Name, buf + 8, kNameSize);
       _segments.Add(seg);
@@ -596,7 +604,7 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
 
   UInt64 currentTotalSize = 0;
   UInt64 currentItemSize;
-
+  
   NCompress::CCopyCoder *copyCoderSpec = new NCompress::CCopyCoder();
   CMyComPtr<ICompressCoder> copyCoder = copyCoderSpec;
 
@@ -623,7 +631,7 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
     RINOK(extractCallback->GetStream(index, &outStream, askMode));
     if (!testMode && !outStream)
       continue;
-
+    
     RINOK(extractCallback->PrepareOperation(askMode));
     RINOK(_inStream->Seek(item.Pa, STREAM_SEEK_SET, NULL));
     streamSpec->Init(currentItemSize);

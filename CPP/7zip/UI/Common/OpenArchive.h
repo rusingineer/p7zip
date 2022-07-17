@@ -70,6 +70,7 @@ struct COpenType
 
   bool CanReturnArc;
   bool CanReturnParser;
+  bool IsHashType;
   bool EachPos;
 
   // bool SkipSfxStub;
@@ -88,9 +89,10 @@ struct COpenType
   COpenType():
       FormatIndex(-1),
       Recursive(true),
-      EachPos(false),
       CanReturnArc(true),
       CanReturnParser(false),
+      IsHashType(false),
+      EachPos(false),
       // SkipSfxStub(true),
       // ExeAsUnknown(true),
       ZerosTailIsAllowed(false),
@@ -121,7 +123,7 @@ struct COpenOptions
   IInStream *stream;
   ISequentialInStream *seqStream;
   IArchiveOpenCallback *callback;
-  COpenCallbackImp *callbackSpec;
+  COpenCallbackImp *callbackSpec; // it's used for SFX only
   OPEN_PROPS_DECL
   // bool openOnlySpecifiedByExtension,
 
@@ -159,7 +161,7 @@ struct CArcErrorInfo
   /* if CArc is Open OK with some format:
         - ErrorFormatIndex shows error format index, if extension is incorrect
         - other variables show message and warnings of archive that is open */
-
+  
   UString ErrorMessage;
   UString WarningMessage;
 
@@ -275,7 +277,7 @@ public:
           // we use InStream in 2 cases (ArcStreamOffset != 0):
           // 1) if we use additional cache stream
           // 2) we reopen sfx archive with CTailInStream
-
+  
   CMyComPtr<IArchiveGetRawProps> GetRawProps;
   CMyComPtr<IArchiveGetRootProps> GetRootProps;
 
@@ -285,11 +287,11 @@ public:
   UString Path;
   UString filePath;
   UString DefaultName;
-  int FormatIndex; // - 1 means Parser.
-  int SubfileIndex;
+  int FormatIndex;     // -1 means Parser
+  UInt32 SubfileIndex; // (UInt32)(Int32)-1; means no subfile
   FILETIME MTime;
   bool MTimeDefined;
-
+  
   Int64 Offset; // it's offset of start of archive inside stream that is open by Archive Handler
   UInt64 PhySize;
   // UInt64 OkPhySize;
@@ -302,7 +304,7 @@ public:
   UInt64 GetEstmatedPhySize() const { return PhySizeDefined ? PhySize : FileSize; }
 
   UInt64 ArcStreamOffset; // offset of stream that is open by Archive Handler
-  Int64 GetGlobalOffset() const { return ArcStreamOffset + Offset; } // it's global offset of archive
+  Int64 GetGlobalOffset() const { return (Int64)ArcStreamOffset + Offset; } // it's global offset of archive
 
   // AString ErrorFlagsText;
 
@@ -310,7 +312,7 @@ public:
 
   bool IsTree;
   bool IsReadOnly;
-
+  
   bool Ask_Deleted;
   bool Ask_AltStream;
   bool Ask_Aux;
@@ -343,12 +345,12 @@ public:
 
   HRESULT GetItemPath(UInt32 index, UString &result) const;
   HRESULT GetDefaultItemPath(UInt32 index, UString &result) const;
-
+  
   // GetItemPath2 adds [DELETED] dir prefix for deleted items.
   HRESULT GetItemPath2(UInt32 index, UString &result) const;
 
   HRESULT GetItem(UInt32 index, CReadArcItem &item) const;
-
+  
   HRESULT GetItemSize(UInt32 index, UInt64 &size, bool &defined) const;
   HRESULT GetItemMTime(UInt32 index, FILETIME &ft, bool &defined) const;
   HRESULT IsItemAnti(UInt32 index, bool &result) const
@@ -358,9 +360,16 @@ public:
   HRESULT OpenStream(const COpenOptions &options);
   HRESULT OpenStreamOrFile(COpenOptions &options);
 
-  HRESULT ReOpen(const COpenOptions &options);
-
+  HRESULT ReOpen(const COpenOptions &options, IArchiveOpenCallback *openCallback_Additional);
+  
   HRESULT CreateNewTailStream(CMyComPtr<IInStream> &stream);
+
+  bool IsHashHandler(const COpenOptions &options) const
+  {
+    if (FormatIndex < 0)
+      return false;
+    return options.codecs->Formats[(unsigned)FormatIndex].Flags_HashHandler();
+  }
 };
 
 struct CArchiveLink
@@ -397,6 +406,13 @@ struct CArchiveLink
   IArchiveGetRawProps *GetArchiveGetRawProps() const { return Arcs.Back().GetRawProps; }
   IArchiveGetRootProps *GetArchiveGetRootProps() const { return Arcs.Back().GetRootProps; }
 
+  /*
+  Open() opens archive and COpenOptions::callback
+  Open2() uses COpenCallbackImp that implements Volumes and password callback
+  Open3() calls Open2() and callbackUI->Open_Finished();
+  Open_Strict() returns S_FALSE also in case, if there is non-open expected nested archive.
+  */
+
   HRESULT Open(COpenOptions &options);
   HRESULT Open2(COpenOptions &options, IOpenCallbackUI *callbackUI);
   HRESULT Open3(COpenOptions &options, IOpenCallbackUI *callbackUI);
@@ -413,5 +429,26 @@ struct CArchiveLink
 };
 
 bool ParseOpenTypes(CCodecs &codecs, const UString &s, CObjectVector<COpenType> &types);
+
+// bool IsHashType(const CObjectVector<COpenType> &types);
+
+
+struct CDirPathSortPair
+{
+  unsigned Len;
+  unsigned Index;
+
+  void SetNumSlashes(const FChar *s);
+  
+  int Compare(const CDirPathSortPair &a) const
+  {
+    // We need sorting order where parent items will be after child items
+    if (Len < a.Len) return 1;
+    if (Len > a.Len) return -1;
+    if (Index < a.Index) return -1;
+    if (Index > a.Index) return 1;
+    return 0;
+  }
+};
 
 #endif

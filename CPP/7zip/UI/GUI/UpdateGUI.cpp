@@ -28,8 +28,8 @@ using namespace NWindows;
 using namespace NFile;
 using namespace NDir;
 
-static CFSTR kDefaultSfxModule = FTEXT("7z.sfx");
-static const wchar_t *kSFXExtension = L"exe";
+static const char * const kDefaultSfxModule = "7z.sfx";
+static const char * const kSFXExtension = "exe";
 
 extern void AddMessageToString(UString &dest, const UString &src);
 
@@ -54,14 +54,14 @@ HRESULT CThreadUpdating::ProcessVirt()
   HRESULT res = UpdateArchive(codecs, *formatIndices, *cmdArcPath,
       *WildcardCensor, *Options,
       ei, UpdateCallbackGUI, UpdateCallbackGUI, needSetPath);
-  FinalMessage.ErrorMessage.Message.SetFromAscii(ei.Message);
+  FinalMessage.ErrorMessage.Message = ei.Message.Ptr();
   ErrorPaths = ei.FileNames;
-  if (ei.SystemError != S_OK && ei.SystemError != E_FAIL && ei.SystemError != E_ABORT)
-    return ei.SystemError;
-  return res;
+  if (res != S_OK)
+    return res;
+  return HRESULT_FROM_WIN32(ei.SystemError);
 }
 
-static void AddProp(CObjectVector<CProperty> &properties, const UString &name, const UString &value)
+static void AddProp_UString(CObjectVector<CProperty> &properties, const char *name, const UString &value)
 {
   CProperty prop;
   prop.Name = name;
@@ -69,16 +69,16 @@ static void AddProp(CObjectVector<CProperty> &properties, const UString &name, c
   properties.Add(prop);
 }
 
-static void AddProp(CObjectVector<CProperty> &properties, const UString &name, UInt32 value)
+static void AddProp_UInt32(CObjectVector<CProperty> &properties, const char *name, UInt32 value)
 {
-  wchar_t tmp[32];
-  ConvertUInt64ToString(value, tmp);
-  AddProp(properties, name, tmp);
+  UString s;
+  s.Add_UInt32(value);
+  AddProp_UString(properties, name, s);
 }
 
-static void AddProp(CObjectVector<CProperty> &properties, const UString &name, bool value)
+static void AddProp_bool(CObjectVector<CProperty> &properties, const char *name, bool value)
 {
-  AddProp(properties, name, value ? UString(L"on"): UString(L"off"));
+  AddProp_UString(properties, name, UString(value ? "on": "off"));
 }
 
 static bool IsThereMethodOverride(bool is7z, const UString &propertiesString)
@@ -112,9 +112,13 @@ static void ParseAndAddPropertires(CObjectVector<CProperty> &properties,
   SplitString(propertiesString, strings);
   FOR_VECTOR (i, strings)
   {
-    const UString &s = strings[i];
+    UString s = strings[i];
+    if (s.Len() > 2
+        && s[0] == '-'
+        && MyCharLower_Ascii(s[1]) == 'm')
+      s.DeleteFrontal(2);
     CProperty property;
-    int index = s.Find(L'=');
+    const int index = s.Find(L'=');
     if (index < 0)
       property.Name = s;
     else
@@ -126,15 +130,15 @@ static void ParseAndAddPropertires(CObjectVector<CProperty> &properties,
   }
 }
 
-static UString GetNumInBytesString(UInt64 v)
+
+static void AddProp_Size(CObjectVector<CProperty> &properties, const char *name, const UInt64 size)
 {
-  wchar_t s[32];
-  ConvertUInt64ToString(v, s);
-  size_t len = wcslen(s);
-  s[len++] = L'B';
-  s[len] = L'\0';
-  return s;
+  UString s;
+  s.Add_UInt64(size);
+  s += 'b';
+  AddProp_UString(properties, name, s);
 }
+
 
 static void SetOutProperties(
     CObjectVector<CProperty> &properties,
@@ -142,54 +146,68 @@ static void SetOutProperties(
     UInt32 level,
     bool setMethod,
     const UString &method,
-    UInt32 dictionary,
+    UInt64 dict64,
     bool orderMode,
     UInt32 order,
     bool solidIsSpecified, UInt64 solidBlockSize,
-    bool multiThreadIsAllowed, UInt32 numThreads,
+    // bool multiThreadIsAllowed,
+    UInt32 numThreads,
     const UString &encryptionMethod,
     bool encryptHeadersIsAllowed, bool encryptHeaders,
+    const NCompression::CMemUse &memUse,
     bool /* sfxMode */)
 {
   if (level != (UInt32)(Int32)-1)
-    AddProp(properties, L"x", (UInt32)level);
+    AddProp_UInt32(properties, "x", (UInt32)level);
   if (setMethod)
   {
     if (!method.IsEmpty())
-      AddProp(properties, is7z ? L"0": L"m", method);
-    if (dictionary != (UInt32)(Int32)-1)
+      AddProp_UString(properties, is7z ? "0": "m", method);
+    if (dict64 != (UInt64)(Int64)-1)
     {
-      UString name;
+      AString name;
       if (is7z)
-        name = L"0";
-      if (orderMode)
-        name += L"mem";
-      else
-        name += L"d";
-      AddProp(properties, name, GetNumInBytesString(dictionary));
+        name = "0";
+      name += (orderMode ? "mem" : "d");
+      AddProp_Size(properties, name, dict64);
     }
     if (order != (UInt32)(Int32)-1)
     {
-      UString name;
+      AString name;
       if (is7z)
-        name = L"0";
-      if (orderMode)
-        name += L"o";
-      else
-        name += L"fb";
-      AddProp(properties, name, (UInt32)order);
+        name = "0";
+      name += (orderMode ? "o" : "fb");
+      AddProp_UInt32(properties, name, (UInt32)order);
     }
   }
     
   if (!encryptionMethod.IsEmpty())
-    AddProp(properties, L"em", encryptionMethod);
+    AddProp_UString(properties, "em", encryptionMethod);
 
   if (encryptHeadersIsAllowed)
-    AddProp(properties, L"he", encryptHeaders);
+    AddProp_bool(properties, "he", encryptHeaders);
   if (solidIsSpecified)
-    AddProp(properties, L"s", GetNumInBytesString(solidBlockSize));
-  if (multiThreadIsAllowed)
-    AddProp(properties, L"mt", numThreads);
+    AddProp_Size(properties, "s", solidBlockSize);
+  
+  if (
+      // multiThreadIsAllowed &&
+      numThreads != (UInt32)(Int32)-1)
+    AddProp_UInt32(properties, "mt", numThreads);
+  
+  if (memUse.IsDefined)
+  {
+    const char *kMemUse = "memuse";
+    if (memUse.IsPercent)
+    {
+      UString s;
+      // s += 'p'; // for debug: alternate percent method
+      s.Add_UInt64(memUse.Val);
+      s += '%';
+      AddProp_UString(properties, kMemUse, s);
+    }
+    else
+      AddProp_Size(properties, kMemUse, memUse.Val);
+  }
 }
 
 struct C_UpdateMode_ToAction_Pair
@@ -293,6 +311,11 @@ static HRESULT ShowDialog(
   CCompressDialog dialog;
   NCompressDialog::CInfo &di = dialog.Info;
   dialog.ArcFormats = &codecs->Formats;
+  {
+    CObjectVector<CCodecInfoUser> userCodecs;
+    codecs->Get_CodecsInfoUser_Vector(userCodecs);
+    dialog.SetMethods(userCodecs);
+  }
 
   if (options.MethodMode.Type_Defined)
     di.FormatIndex = options.MethodMode.Type.FormatIndex;
@@ -305,9 +328,13 @@ static HRESULT ShowDialog(
     if (!oneFile && ai.Flags_KeepName())
       continue;
     if ((int)i != di.FormatIndex)
+    {
+      if (ai.Flags_HashHandler())
+        continue;
       if (ai.Name.IsEqualTo_Ascii_NoCase("swfc"))
         if (!oneFile || name.Len() < 4 || !StringsAreEqualNoCase_Ascii(name.RightPtr(4), ".swf"))
           continue;
+    }
     dialog.ArcIndices.Add(i);
   }
   if (dialog.ArcIndices.IsEmpty())
@@ -395,12 +422,14 @@ static HRESULT ShowDialog(
       di.Level,
       !methodOverride,
       di.Method,
-      di.Dictionary,
+      di.Dict64,
       di.OrderMode, di.Order,
       di.SolidIsSpecified, di.SolidBlockSize,
-      di.MultiThreadIsAllowed, di.NumThreads,
+      // di.MultiThreadIsAllowed,
+      di.NumThreads,
       di.EncryptionMethod,
       di.EncryptHeadersIsAllowed, di.EncryptHeaders,
+      di.MemUsage,
       di.SFXMode);
   
   options.OpenShareForWrite = di.OpenShareForWrite;
@@ -453,8 +482,8 @@ HRESULT UpdateGUI(
   }
   if (options.SfxMode && options.SfxModule.IsEmpty())
   {
-    FString folder = NWindows::NDLL::GetModuleDirPrefix();
-    options.SfxModule = folder + kDefaultSfxModule;
+    options.SfxModule = NWindows::NDLL::GetModuleDirPrefix();
+    options.SfxModule += kDefaultSfxModule;
   }
 
   CThreadUpdating tu;
@@ -466,10 +495,17 @@ HRESULT UpdateGUI(
   tu.cmdArcPath = &cmdArcPath;
 
   tu.UpdateCallbackGUI = callback;
-  tu.UpdateCallbackGUI->ProgressDialog = &tu.ProgressDialog;
+  tu.UpdateCallbackGUI->ProgressDialog = &tu;
   tu.UpdateCallbackGUI->Init();
 
   UString title = LangString(IDS_PROGRESS_COMPRESSING);
+  if (!formatIndices.IsEmpty())
+  {
+    const int fin = formatIndices[0].FormatIndex;
+    if (fin >= 0)
+      if (codecs->Formats[fin].Flags_HashHandler())
+        title = LangString(IDS_CHECKSUM_CALCULATING);
+  }
 
   /*
   if (hwndParent != 0)
@@ -482,10 +518,10 @@ HRESULT UpdateGUI(
 
   tu.WildcardCensor = &censor;
   tu.Options = &options;
-  tu.ProgressDialog.IconID = IDI_ICON;
+  tu.IconID = IDI_ICON;
 
   RINOK(tu.Create(title, hwndParent));
 
-  messageWasDisplayed = tu.ThreadFinishedOK && tu.ProgressDialog.MessagesDisplayed;
+  messageWasDisplayed = tu.ThreadFinishedOK && tu.MessagesDisplayed;
   return tu.Result;
 }

@@ -14,7 +14,7 @@
 
 namespace NArchive {
 namespace NTar {
-
+ 
 static void MyStrNCpy(char *dest, const char *src, unsigned size)
 {
   for (unsigned i = 0; i < size; i++)
@@ -26,24 +26,25 @@ static void MyStrNCpy(char *dest, const char *src, unsigned size)
   }
 }
 
-static bool OctalToNumber(const char *srcString, unsigned size, UInt64 &res)
+static bool OctalToNumber(const char *srcString, unsigned size, UInt64 &res, bool allowEmpty = false)
 {
+  res = 0;
   char sz[32];
   MyStrNCpy(sz, srcString, size);
   sz[size] = 0;
   const char *end;
   unsigned i;
   for (i = 0; sz[i] == ' '; i++);
+  if (sz[i] == 0)
+    return allowEmpty;
   res = ConvertOctStringToUInt64(sz + i, &end);
-  if (end == sz + i)
-    return false;
   return (*end == ' ' || *end == 0);
 }
 
-static bool OctalToNumber32(const char *srcString, unsigned size, UInt32 &res)
+static bool OctalToNumber32(const char *srcString, unsigned size, UInt32 &res, bool allowEmpty = false)
 {
   UInt64 res64;
-  if (!OctalToNumber(srcString, size, res64))
+  if (!OctalToNumber(srcString, size, res64, allowEmpty))
     return false;
   res = (UInt32)res64;
   return (res64 <= 0xFFFFFFFF);
@@ -71,24 +72,33 @@ static bool IsRecordLast(const char *buf)
 
 static void ReadString(const char *s, unsigned size, AString &result)
 {
-  char temp[NFileHeader::kRecordSize + 1];
-  MyStrNCpy(temp, s, size);
-  temp[size] = '\0';
-  result = temp;
+  result.SetFrom_CalcLen(s, size);
 }
 
 static bool ParseInt64(const char *p, Int64 &val)
 {
   UInt32 h = GetBe32(p);
-  val = GetBe64(p + 4);
+  val = (Int64)GetBe64(p + 4);
   if (h == (UInt32)1 << 31)
     return ((val >> 63) & 1) == 0;
   if (h == (UInt32)(Int32)-1)
     return ((val >> 63) & 1) != 0;
   UInt64 uv;
   bool res = OctalToNumber(p, 12, uv);
-  val = uv;
+  val = (Int64)uv;
   return res;
+}
+
+static bool ParseInt64_MTime(const char *p, Int64 &val)
+{
+  // rare case tar : ZEROs in Docker-Windows TARs
+  // rare case tar : spaces
+  if (GetUi32(p) != 0)
+  for (unsigned i = 0; i < 12; i++)
+    if (p[i] != ' ')
+      return ParseInt64(p, val);
+  val = 0;
+  return true;
 }
 
 static bool ParseSize(const char *p, UInt64 &val)
@@ -99,7 +109,9 @@ static bool ParseSize(const char *p, UInt64 &val)
     val = GetBe64(p + 4);
     return ((val >> 63) & 1) == 0;
   }
-  return OctalToNumber(p, 12, val);
+  return OctalToNumber(p, 12, val,
+      true // 20.03: allow empty size for 'V' Label entry
+      );
 }
 
 #define CHECK(x) { if (!(x)) return k_IsArc_Res_NO; }
@@ -113,7 +125,8 @@ API_FUNC_IsArc IsArc_Tar(const Byte *p2, size_t size)
   p += NFileHeader::kNameSize;
 
   UInt32 mode;
-  CHECK(OctalToNumber32(p, 8, mode)); p += 8;
+  // we allow empty Mode value for LongName prefix items
+  CHECK(OctalToNumber32(p, 8, mode, true)); p += 8;
 
   // if (!OctalToNumber32(p, 8, item.UID)) item.UID = 0;
   p += 8;
@@ -124,7 +137,7 @@ API_FUNC_IsArc IsArc_Tar(const Byte *p2, size_t size)
   Int64 time;
   UInt32 checkSum;
   CHECK(ParseSize(p, packSize)); p += 12;
-  CHECK(ParseInt64(p, time)); p += 12;
+  CHECK(ParseInt64_MTime(p, time)); p += 12;
   CHECK(OctalToNumber32(p, 8, checkSum));
   return k_IsArc_Res_YES;
 }
@@ -177,23 +190,24 @@ static HRESULT GetNextItemReal(ISequentialInStream *stream, bool &filled, CItemE
     // error = "There are data after end of archive";
     return S_OK;
   }
-
+  
   error = k_ErrorType_Corrupted;
   ReadString(p, NFileHeader::kNameSize, item.Name); p += NFileHeader::kNameSize;
   item.NameCouldBeReduced =
       (item.Name.Len() == NFileHeader::kNameSize ||
        item.Name.Len() == NFileHeader::kNameSize - 1);
 
-  RIF(OctalToNumber32(p, 8, item.Mode)); p += 8;
+  // we allow empty Mode value for LongName prefix items
+  RIF(OctalToNumber32(p, 8, item.Mode, true)); p += 8;
 
-  if (!OctalToNumber32(p, 8, item.UID)) item.UID = 0; p += 8;
-  if (!OctalToNumber32(p, 8, item.GID)) item.GID = 0; p += 8;
+  if (!OctalToNumber32(p, 8, item.UID)) { item.UID = 0; }  p += 8;
+  if (!OctalToNumber32(p, 8, item.GID)) { item.GID = 0; }  p += 8;
 
   RIF(ParseSize(p, item.PackSize));
   item.Size = item.PackSize;
   p += 12;
-  RIF(ParseInt64(p, item.MTime)); p += 12;
-
+  RIF(ParseInt64_MTime(p, item.MTime)); p += 12;
+  
   UInt32 checkSum;
   RIF(OctalToNumber32(p, 8, checkSum));
   memset(p, ' ', 8); p += 8;
@@ -230,6 +244,15 @@ static HRESULT GetNextItemReal(ISequentialInStream *stream, bool &filled, CItemE
     item.PackSize = 0;
     item.Size = 0;
   }
+
+  if (item.LinkFlag == NFileHeader::NLinkFlag::kDirectory)
+  {
+    // GNU tar ignores Size field, if LinkFlag is kDirectory
+    // 21.02 : we set PackSize = 0 to be more compatible with GNU tar
+    item.PackSize = 0;
+    // item.Size = 0;
+  }
+
   /*
     TAR standard requires sum of unsigned byte values.
     But some TAR programs use sum of signed byte values.
@@ -243,7 +266,7 @@ static HRESULT GetNextItemReal(ISequentialInStream *stream, bool &filled, CItemE
     checkSumReal_Signed += (signed char)c;
     checkSumReal += (Byte)buf[i];
   }
-
+  
   if (checkSumReal != checkSum)
   {
     if ((UInt32)checkSumReal_Signed != checkSum)
@@ -254,7 +277,7 @@ static HRESULT GetNextItemReal(ISequentialInStream *stream, bool &filled, CItemE
 
   if (item.LinkFlag == NFileHeader::NLinkFlag::kSparse)
   {
-    Byte isExtended = buf[482];
+    Byte isExtended = (Byte)buf[482];
     if (isExtended != 0 && isExtended != 1)
       return S_OK;
     RIF(ParseSize(buf + 483, item.Size));
@@ -294,7 +317,7 @@ static HRESULT GetNextItemReal(ISequentialInStream *stream, bool &filled, CItemE
       }
 
       item.HeaderSize += NFileHeader::kRecordSize;
-      isExtended = buf[21 * 24];
+      isExtended = (Byte)buf[21 * 24];
       if (isExtended != 0 && isExtended != 1)
         return S_OK;
       for (unsigned i = 0; i < 21; i++)
@@ -322,7 +345,7 @@ static HRESULT GetNextItemReal(ISequentialInStream *stream, bool &filled, CItemE
     if (min > item.Size)
       return S_OK;
   }
-
+ 
   filled = true;
   error = k_ErrorType_OK;
   return S_OK;
@@ -385,7 +408,7 @@ HRESULT ReadItem(ISequentialInStream *stream, bool &filled, CItemEx &item, EErro
   AString nameL;
   AString nameK;
   AString pax;
-
+  
   for (;;)
   {
     RINOK(GetNextItemReal(stream, filled, item, error));
@@ -395,10 +418,10 @@ HRESULT ReadItem(ISequentialInStream *stream, bool &filled, CItemEx &item, EErro
         error = k_ErrorType_Corrupted;
       return S_OK;
     }
-
+    
     if (error != k_ErrorType_OK)
       return S_OK;
-
+    
     if (item.LinkFlag == NFileHeader::NLinkFlag::kGnu_LongName || // file contains a long name
         item.LinkFlag == NFileHeader::NLinkFlag::kGnu_LongLink)   // file contains a long linkname
     {
@@ -427,15 +450,22 @@ HRESULT ReadItem(ISequentialInStream *stream, bool &filled, CItemEx &item, EErro
       case 'x':
       case 'X':
       {
-        // pax Extended Header
-        if (item.Name.IsPrefixedBy("PaxHeader/"))
+        const char *s = item.Name.Ptr();
+        if (IsString1PrefixedByString2(s, "./"))
+          s += 2;
+        if (IsString1PrefixedByString2(s, "./"))
+          s += 2;
+        if (   IsString1PrefixedByString2(s, "PaxHeader/")
+            || IsString1PrefixedByString2(s, "PaxHeaders.X/")
+            || IsString1PrefixedByString2(s, "PaxHeaders.4467/")
+            || StringsAreEqual_Ascii(s, "@PaxHeader")
+            )
         {
           RINOK(ReadDataToString(stream, item, pax, error));
           if (error != k_ErrorType_OK)
             return S_OK;
           continue;
         }
-
         break;
       }
       case NFileHeader::NLinkFlag::kDumpDir:
@@ -452,13 +482,13 @@ HRESULT ReadItem(ISequentialInStream *stream, bool &filled, CItemEx &item, EErro
         if (item.LinkFlag > '7' || (item.LinkFlag < '0' && item.LinkFlag != 0))
           return S_OK;
     }
-
+    
     if (flagL)
     {
       item.Name = nameL;
       item.NameCouldBeReduced = false;
     }
-
+    
     if (flagK)
     {
       item.LinkName = nameK;
@@ -473,7 +503,11 @@ HRESULT ReadItem(ISequentialInStream *stream, bool &filled, CItemEx &item, EErro
       if (ParsePaxLongName(pax, name))
         item.Name = name;
       else
-        error = k_ErrorType_Warning;
+      {
+        // no "path" property is allowed in pax4467
+        // error = k_ErrorType_Warning;
+      }
+      pax.Empty();
     }
 
     return S_OK;

@@ -31,8 +31,9 @@ namespace NMub {
 
 #define MACH_CPU_TYPE_PPC64 (MACH_CPU_ARCH_ABI64 | MACH_CPU_TYPE_PPC)
 #define MACH_CPU_TYPE_AMD64 (MACH_CPU_ARCH_ABI64 | MACH_CPU_TYPE_386)
+#define MACH_CPU_TYPE_ARM64 (MACH_CPU_ARCH_ABI64 | MACH_CPU_TYPE_ARM)
 
-#define MACH_CPU_SUBTYPE_LIB64 (1 << 31)
+#define MACH_CPU_SUBTYPE_LIB64 ((UInt32)1 << 31)
 
 #define MACH_CPU_SUBTYPE_I386_ALL 3
 
@@ -105,29 +106,33 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
       const char *ext = 0;
       switch (item.Type)
       {
-        case MACH_CPU_TYPE_386:   ext = "x86";    break;
+        case MACH_CPU_TYPE_386:   ext = "x86";   break;
         case MACH_CPU_TYPE_ARM:   ext = "arm";   break;
         case MACH_CPU_TYPE_SPARC: ext = "sparc"; break;
         case MACH_CPU_TYPE_PPC:   ext = "ppc";   break;
-        case MACH_CPU_TYPE_PPC64: ext = "ppc64"; break;
         case MACH_CPU_TYPE_AMD64: ext = "x64";   break;
+        case MACH_CPU_TYPE_ARM64: ext = "arm64"; break;
+        case MACH_CPU_TYPE_PPC64: ext = "ppc64"; break;
         default:
           temp[0] = 'c';
           temp[1] = 'p';
           temp[2] = 'u';
-          ConvertUInt32ToString(item.Type, temp + 3);
+          ConvertUInt32ToString(item.Type & ~MACH_CPU_ARCH_ABI64, temp + 3);
+          if (item.Type & MACH_CPU_ARCH_ABI64)
+            MyStringCopy(temp + MyStringLen(temp), "_64");
           break;
       }
       if (ext)
         strcpy(temp, ext);
-      if (item.SubType != 0 && (
-          item.Type != MACH_CPU_TYPE_386 &&
-          item.Type != MACH_CPU_TYPE_AMD64 ||
-          (item.SubType & ~(UInt32)MACH_CPU_SUBTYPE_LIB64) != MACH_CPU_SUBTYPE_I386_ALL))
+      if (item.SubType != 0)
+      if ((item.Type != MACH_CPU_TYPE_386 &&
+           item.Type != MACH_CPU_TYPE_AMD64)
+           || (item.SubType & ~(UInt32)MACH_CPU_SUBTYPE_LIB64) != MACH_CPU_SUBTYPE_I386_ALL
+         )
       {
         unsigned pos = MyStringLen(temp);
         temp[pos++] = '-';
-          ConvertUInt32ToString(item.SubType, temp + pos);
+        ConvertUInt32ToString(item.SubType, temp + pos);
       }
       return PropVarEm_Set_Str(value, temp);
     }

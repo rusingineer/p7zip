@@ -14,26 +14,18 @@
 namespace NArchive {
 namespace NZip {
 
-struct CBaseProps
-{
-  CMethodProps MethodInfo;
-  Int32 Level;
+const CMethodId kMethodId_ZipBase = 0x040100;
+const CMethodId kMethodId_BZip2   = 0x040202;
 
-  #ifndef _7ZIP_ST
-  UInt32 NumThreads;
-  bool NumThreadsWasChanged;
-  #endif
+struct CBaseProps: public CMultiMethodProps
+{
   bool IsAesMode;
   Byte AesKeyMode;
 
   void Init()
   {
-    MethodInfo.Clear();
-    Level = -1;
-    #ifndef _7ZIP_ST
-    NumThreads = NWindows::NSystem::GetNumberOfProcessors();;
-    NumThreadsWasChanged = false;
-    #endif
+    CMultiMethodProps::Init();
+    
     IsAesMode = false;
     AesKeyMode = 3;
   }
@@ -43,7 +35,7 @@ struct CCompressionMethodMode: public CBaseProps
 {
   CRecordVector<Byte> MethodSequence;
   bool PasswordIsDefined;
-  AString Password;
+  AString Password; // _Wipe
 
   UInt64 _dataSizeReduce;
   bool _dataSizeReduceDefined;
@@ -55,6 +47,8 @@ struct CCompressionMethodMode: public CBaseProps
     _dataSizeReduceDefined = false;
     _dataSizeReduce = 0;
   }
+
+  ~CCompressionMethodMode() { Password.Wipe_and_Empty(); }
 };
 
 }}

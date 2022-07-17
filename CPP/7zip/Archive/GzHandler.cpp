@@ -11,6 +11,7 @@
 #include "../../Common/StringConvert.h"
 
 #include "../../Windows/PropVariant.h"
+#include "../../Windows/PropVariantUtils.h"
 #include "../../Windows/TimeUtils.h"
 
 #include "../Common/ProgressUtils.h"
@@ -44,7 +45,7 @@ namespace NGz {
 
   namespace NFlags
   {
-    const Byte kIsText  = 1 << 0;
+    // const Byte kIsText  = 1 << 0;
     const Byte kCrc     = 1 << 1;
     const Byte kExtra   = 1 << 2;
     const Byte kName    = 1 << 3;
@@ -109,7 +110,6 @@ static const char * const kHostOSes[] =
   , "OS/X"
 };
 
-static const char *kUnknownOS = "Unknown";
 
 class CItem
 {
@@ -234,7 +234,8 @@ static UInt32 Is_Deflate(const Byte *p, size_t size)
       return k_IsArc_Res_NO;
     if (size < 4)
       return k_IsArc_Res_NEED_MORE;
-    if (GetUi16(p) != (UInt16)~GetUi16(p + 2))
+    UInt16 r = (UInt16)~GetUi16(p + 2);
+    if (GetUi16(p) != r)
       return k_IsArc_Res_NO;
   }
   else if (type == 2)
@@ -248,8 +249,8 @@ static UInt32 Is_Deflate(const Byte *p, size_t size)
   return k_IsArc_Res_YES;
 }
 
-static unsigned kNameMaxLen = 1 << 12;
-static unsigned kCommentMaxLen = 1 << 16;
+static const unsigned kNameMaxLen = 1 << 12;
+static const unsigned kCommentMaxLen = 1 << 16;
 
 API_FUNC_static_IsArc IsArc_Gz(const Byte *p, size_t size)
 {
@@ -537,7 +538,7 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
       if (_item.NameIsPresent())
       {
         UString s = MultiByteToUnicodeString(_item.Name, CP_ACP);
-        s.AddAscii(".gz");
+        s += ".gz";
         prop = s;
       }
       break;
@@ -587,8 +588,7 @@ STDMETHODIMP CHandler::GetProperty(UInt32 /* index */, PROPID propID, PROPVARIAN
         prop = _packSize;
       break;
     }
-    case kpidHostOS: prop = (_item.HostOS < ARRAY_SIZE(kHostOSes)) ?
-          kHostOSes[_item.HostOS] : kUnknownOS; break;
+    case kpidHostOS: TYPE_TO_PROP(kHostOSes, _item.HostOS, prop); break;
     case kpidCRC: if (_stream) prop = _item.Crc; break;
   }
   prop.Detach(value);
@@ -963,7 +963,7 @@ STDMETHODIMP CHandler::UpdateItems(ISequentialOutStream *outStream, UInt32 numIt
         UString name = prop.bstrVal;
         int slashPos = name.ReverseFind_PathSepar();
         if (slashPos >= 0)
-          name.DeleteFrontal(slashPos + 1);
+          name.DeleteFrontal((unsigned)(slashPos + 1));
         newItem.Name = UnicodeStringToMultiByte(name, CP_ACP);
         if (!newItem.Name.IsEmpty())
           newItem.Flags |= NFlags::kName;
@@ -1020,7 +1020,7 @@ STDMETHODIMP CHandler::UpdateItems(ISequentialOutStream *outStream, UInt32 numIt
     newItem.WriteHeader(outStream);
     offset += _headerSize;
   }
-  RINOK(_stream->Seek(offset, STREAM_SEEK_SET, NULL));
+  RINOK(_stream->Seek((Int64)offset, STREAM_SEEK_SET, NULL));
 
   return NCompress::CopyStream(_stream, outStream, progress);
 
@@ -1035,7 +1035,7 @@ STDMETHODIMP CHandler::SetProperties(const wchar_t * const *names, const PROPVAR
 static const Byte k_Signature[] = { kSignature_0, kSignature_1, kSignature_2 };
 
 REGISTER_ARC_IO(
-  "gzip", "gz gzip tgz tpz", "* * .tar .tar", 0xEF,
+  "gzip", "gz gzip tgz tpz apk", "* * .tar .tar .tar", 0xEF,
   k_Signature,
   0,
   NArcInfoFlags::kKeepName,

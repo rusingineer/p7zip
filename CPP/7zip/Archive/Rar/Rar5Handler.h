@@ -26,7 +26,7 @@ namespace NHeaderFlags
   // const unsigned kIsChild = 1 << 5;
   // const unsigned kPreserveChild = 1 << 6;
 }
-
+  
 namespace NHeaderType
 {
   enum
@@ -85,7 +85,7 @@ enum EHostOS
 
 // ---------- Extra ----------
 
-namespace NExtraRecordType
+namespace NExtraID
 {
   enum
   {
@@ -99,7 +99,7 @@ namespace NExtraRecordType
   };
 }
 
-// const unsigned kCryptoAlgo_AES = 0;
+const unsigned kCryptoAlgo_AES = 0;
 
 namespace NCryptoFlags
 {
@@ -128,13 +128,14 @@ namespace NTimeRecord
     k_Index_CTime,
     k_Index_ATime
   };
-
+  
   namespace NFlags
   {
     const unsigned kUnixTime = 1 << 0;
     const unsigned kMTime    = 1 << 1;
-    // const unsigned kCTime    = 1 << 2;
-    // const unsigned kATime    = 1 << 3;
+    const unsigned kCTime    = 1 << 2;
+    const unsigned kATime    = 1 << 3;
+    const unsigned kUnixNs   = 1 << 4;
   }
 }
 
@@ -156,6 +157,17 @@ namespace NLinkFlags
 }
 
 
+struct CLinkInfo
+{
+  UInt64 Type;
+  UInt64 Flags;
+  unsigned NameOffset;
+  unsigned NameLen;
+  
+  bool Parse(const Byte *p, unsigned size);
+};
+
+
 struct CItem
 {
   UInt32 CommonFlags;
@@ -168,7 +180,7 @@ struct CItem
 
   AString Name;
 
-  int VolIndex;
+  unsigned VolIndex;
   int NextItem;
 
   UInt32 UnixMTime;
@@ -181,7 +193,7 @@ struct CItem
   UInt64 Size;
   UInt64 PackSize;
   UInt64 HostOS;
-
+  
   UInt64 DataPos;
   UInt64 Version;
 
@@ -191,7 +203,7 @@ struct CItem
   {
     CommonFlags = 0;
     Flags = 0;
-
+    
     VolIndex = 0;
     NextItem = -1;
 
@@ -224,24 +236,26 @@ struct CItem
   UInt32 GetDictSize() const { return (((UInt32)Method >> 10) & 0xF); }
 
   bool IsService() const { return RecordType == NHeaderType::kService; }
-
+  
   bool Is_STM() const { return IsService() && Name == "STM"; }
   bool Is_CMT() const { return IsService() && Name == "CMT"; }
   bool Is_ACL() const { return IsService() && Name == "ACL"; }
   // bool Is_QO()  const { return IsService() && Name == "QO"; }
 
-  int FindExtra(unsigned type, unsigned &recordDataSize) const;
+  int FindExtra(unsigned extraID, unsigned &recordDataSize) const;
+  void PrintInfo(AString &s) const;
+
 
   bool IsEncrypted() const
   {
     unsigned size;
-    return FindExtra(NExtraRecordType::kCrypto, size) >= 0;
+    return FindExtra(NExtraID::kCrypto, size) >= 0;
   }
 
   int FindExtra_Blake() const
   {
     unsigned size = 0;
-    int offset = FindExtra(NExtraRecordType::kHash, size);
+    int offset = FindExtra(NExtraID::kHash, size);
     if (offset >= 0
         && size == BLAKE2S_DIGEST_SIZE + 1
         && Extra[(unsigned)offset] == kHashID_Blake2sp)
@@ -250,14 +264,6 @@ struct CItem
   }
 
   bool FindExtra_Version(UInt64 &version) const;
-
-  struct CLinkInfo
-  {
-    UInt64 Type;
-    UInt64 Flags;
-    unsigned NameOffset;
-    unsigned NameLen;
-  };
 
   bool FindExtra_Link(CLinkInfo &link) const;
   void Link_to_Prop(unsigned linkType, NWindows::NCOM::CPropVariant &prop) const;
@@ -308,12 +314,12 @@ struct CInArcInfo
     UInt64 Flags;
     UInt64 QuickOpen;
     UInt64 Recovery;
-
+    
     bool Is_QuickOpen() const { return (Flags & NLocatorFlags::kQuickOpen) != 0; }
     bool Is_Recovery() const { return (Flags & NLocatorFlags::kRecovery) != 0; }
   };
 
-  int FindExtra(unsigned type, unsigned &recordDataSize) const;
+  int FindExtra(unsigned extraID, unsigned &recordDataSize) const;
   bool FindExtra_Locator(CLocator &locator) const;
   */
 
@@ -390,9 +396,9 @@ private:
   DECL_EXTERNAL_CODECS_VARS
 
   UInt64 GetPackSize(unsigned refIndex) const;
-
+  
   void FillLinks();
-
+  
   HRESULT Open2(IInStream *stream,
       const UInt64 *maxCheckStartPosition,
       IArchiveOpenCallback *openCallback);
@@ -403,7 +409,7 @@ public:
   QUERY_ENTRY_ISetCompressCodecsInfo
   MY_QUERYINTERFACE_END
   MY_ADDREF_RELEASE
-
+  
   INTERFACE_IInArchive(;)
   INTERFACE_IArchiveGetRawProps(;)
 

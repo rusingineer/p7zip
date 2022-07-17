@@ -28,12 +28,12 @@ public:
   {
     _needChangeForNext = true;
     _after.Empty();
-    UString base = name;
-    int dotPos = name.ReverseFind_Dot();
+    UString base (name);
+    const int dotPos = name.ReverseFind_Dot();
 
     if (dotPos >= 0)
     {
-      const UString ext = name.Ptr(dotPos + 1);
+      const UString ext (name.Ptr(dotPos + 1));
       if (ext.IsEqualTo_Ascii_NoCase("rar"))
       {
         _after = name.Ptr(dotPos);
@@ -41,7 +41,7 @@ public:
       }
       else if (ext.IsEqualTo_Ascii_NoCase("exe"))
       {
-        _after.SetFromAscii(".rar");
+        _after = ".rar";
         base.DeleteFrom(dotPos);
       }
       else if (!newStyle)
@@ -76,8 +76,8 @@ public:
     
     _after.Empty();
     _before = base;
-    _before += L'.';
-    _changed.SetFromAscii("r00");
+    _before += '.';
+    _changed = "r00";
     _needChangeForNext = false;
     return true;
   }

@@ -43,7 +43,7 @@ static const Byte kProps[] =
   kpidLinks,
   kpidIsAltStream,
   kpidNumAltStreams,
-
+  
   #ifdef WIM_DETAILS
   , kpidVolume
   , kpidOffset
@@ -94,15 +94,6 @@ static void AddErrorMessage(AString &s, const char *message)
   s += message;
 }
 
-static void ConvertByteToHex(unsigned value, char *s)
-{
-  for (int i = 0; i < 2; i++)
-  {
-    unsigned t = value & 0xF;
-    value >>= 4;
-    s[1 - i] = (char)((t < 10) ? ('0' + t) : ('A' + (t - 10)));
-  }
-}
 
 STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
 {
@@ -122,7 +113,7 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
     case kpidPhySize:  prop = _phySize; break;
     case kpidSize: prop = _db.GetUnpackSize(); break;
     case kpidPackSize: prop = _db.GetPackSize(); break;
-
+    
     case kpidCTime:
       if (_xmls.Size() == 1)
       {
@@ -177,17 +168,14 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
       UInt32 ver2 = (_version >> 8) & 0xFF;
       UInt32 ver3 = (_version) & 0xFF;
 
-      char s[16];
-      ConvertUInt32ToString(ver1, s);
-      AString res = s;
+      AString res;
+      res.Add_UInt32(ver1);
       res += '.';
-      ConvertUInt32ToString(ver2, s);
-      res += s;
+      res.Add_UInt32(ver2);
       if (ver3 != 0)
       {
         res += '.';
-        ConvertUInt32ToString(ver3, s);
-        res += s;
+        res.Add_UInt32(ver3);
       }
       prop = res;
       break;
@@ -210,7 +198,7 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
       }
       break;
     case kpidNumVolumes: if (_volumes.Size() > 0) prop = (UInt32)(_volumes.Size() - 1); break;
-
+    
     case kpidClusterSize:
       if (_xmls.Size() > 0)
       {
@@ -229,22 +217,16 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
         const CHeader &h = _volumes[_firstVolumeIndex].Header;
         if (GetUi32(h.Guid) != 0)
         {
-          char temp[16 * 2 + 4];
-          int i;
-          for (i = 0; i < 4; i++)
-            ConvertByteToHex(h.Guid[i], temp + i * 2);
-          temp[i * 2] = 0;
-          AString s = temp;
+          char temp[64];
+          RawLeGuidToString(h.Guid, temp);
+          temp[8] = 0; // for reduced GUID
+          AString s (temp);
           const char *ext = ".wim";
           if (h.NumParts != 1)
           {
             s += '_';
             if (h.PartNumber != 1)
-            {
-              char sz[16];
-              ConvertUInt32ToString(h.PartNumber, sz);
-              s += sz;
-            }
+              s.Add_UInt32(h.PartNumber);
             ext = ".swm";
           }
           s += ext;
@@ -262,9 +244,7 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
           AString s;
           if (h.PartNumber != 1)
           {
-            char sz[16];
-            ConvertUInt32ToString(h.PartNumber, sz);
-            s = sz;
+            s.Add_UInt32(h.PartNumber);
             s += '.';
           }
           s += "swm";
@@ -275,13 +255,13 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
 
     case kpidNumImages: prop = (UInt32)_db.Images.Size(); break;
     case kpidBootImage: if (_bootIndex != 0) prop = (UInt32)_bootIndex; break;
-
+    
     case kpidMethod:
     {
       UInt32 methodUnknown = 0;
       UInt32 methodMask = 0;
       unsigned chunkSizeBits = 0;
-
+      
       {
         FOR_VECTOR (i, _xmls)
         {
@@ -312,25 +292,21 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
 
       if (methodUnknown != 0)
       {
-        char temp[32];
-        ConvertUInt32ToString(methodUnknown, temp);
         res.Add_Space_if_NotEmpty();
-        res += temp;
+        res.Add_UInt32(methodUnknown);
         numMethods++;
       }
 
       if (numMethods == 1 && chunkSizeBits != 0)
       {
-        char temp[32];
-        temp[0] = ':';
-        ConvertUInt32ToString((UInt32)chunkSizeBits, temp + 1);
-        res += temp;
+        res += ':';
+        res.Add_UInt32((UInt32)chunkSizeBits);
       }
 
       prop = res;
       break;
     }
-
+    
     case kpidIsTree: prop = true; break;
     case kpidIsAltStream: prop = _db.ThereAreAltStreams; break;
     case kpidIsAux: prop = true; break;
@@ -374,7 +350,7 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
   COM_TRY_END
 }
 
-void GetFileTime(const Byte *p, NCOM::CPropVariant &prop)
+static void GetFileTime(const Byte *p, NCOM::CPropVariant &prop)
 {
   prop.vt = VT_FILETIME;
   prop.filetime.dwLowDateTime = Get32(p);
@@ -387,19 +363,19 @@ static void MethodToProp(int method, int chunksSizeBits, NCOM::CPropVariant &pro
   if (method >= 0)
   {
     char temp[32];
-
+    
     if ((unsigned)method < ARRAY_SIZE(k_Methods))
       strcpy(temp, k_Methods[(unsigned)method]);
     else
-      ConvertUInt32ToString((unsigned)method, temp);
-
+      ConvertUInt32ToString((UInt32)(unsigned)method, temp);
+    
     if (chunksSizeBits >= 0)
     {
       size_t pos = strlen(temp);
       temp[pos++] = ':';
       ConvertUInt32ToString((unsigned)chunksSizeBits, temp + pos);
     }
-
+    
     prop = temp;
   }
 }
@@ -436,9 +412,6 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
           _db.GetItemPath(realIndex, _showImageNumber, prop);
         else
         {
-          char sz[16];
-          ConvertUInt32ToString(item.StreamIndex, sz);
-          AString s = sz;
           /*
           while (s.Len() < _nameLenForStreams)
             s = '0' + s;
@@ -448,11 +421,12 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
             s = (AString)("[Free]" STRING_PATH_SEPARATOR) + sz;
           else
           */
-          s = (AString)(FILES_DIR_NAME STRING_PATH_SEPARATOR) + sz;
+          AString s (FILES_DIR_NAME STRING_PATH_SEPARATOR);
+          s.Add_UInt32(item.StreamIndex);
           prop = s;
         }
         break;
-
+      
       case kpidName:
         if (item.ImageIndex >= 0)
           _db.GetItemName(realIndex, prop);
@@ -521,7 +495,7 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
 
         break;
       }
-
+      
       case kpidIsDir: prop = item.IsDir; break;
       case kpidIsAltStream: prop = item.IsAltStream; break;
       case kpidNumAltStreams:
@@ -740,7 +714,7 @@ STDMETHODIMP CHandler::GetParent(UInt32 index, UInt32 *parent, UInt32 *parentTyp
     return S_OK;
 
   const CItem &item = _db.Items[_db.SortedItems[index]];
-
+  
   if (item.ImageIndex >= 0)
   {
     *parentType = item.IsAltStream ? NParentType::kAltStream : NParentType::kDir;
@@ -810,12 +784,12 @@ STDMETHODIMP CHandler::GetRawProp(UInt32 index, PROPID propID, const void **data
     return S_OK;
 
   unsigned index2 = _db.SortedItems[index];
-
+  
   if (propID == kpidNtSecure)
   {
     return GetSecurity(index2, data, dataSize, propType);
   }
-
+  
   const CItem &item = _db.Items[index2];
   if (propID == kpidSha1)
   {
@@ -834,7 +808,7 @@ STDMETHODIMP CHandler::GetRawProp(UInt32 index, PROPID propID, const void **data
     *propType = NPropDataType::kRaw;
     return S_OK;
   }
-
+  
   if (propID == kpidNtReparse && !_isOldVersion)
   {
     // we don't know about Reparse field in OLD WIM format
@@ -874,9 +848,10 @@ public:
 
   UString GetNextName(UInt32 index) const
   {
-    wchar_t s[16];
-    ConvertUInt32ToString(index, s);
-    return _before + (UString)s + _after;
+    UString s = _before;
+    s.Add_UInt32(index);
+    s += _after;
+    return s;
   }
 };
 
@@ -887,23 +862,25 @@ STDMETHODIMP CHandler::Open(IInStream *inStream, const UInt64 *, IArchiveOpenCal
   Close();
   {
     CMyComPtr<IArchiveOpenVolumeCallback> openVolumeCallback;
-
+    
     CVolumeName seqName;
     if (callback)
       callback->QueryInterface(IID_IArchiveOpenVolumeCallback, (void **)&openVolumeCallback);
 
     UInt32 numVolumes = 1;
-
+    
     for (UInt32 i = 1; i <= numVolumes; i++)
     {
       CMyComPtr<IInStream> curStream;
-
+      
       if (i == 1)
         curStream = inStream;
       else
       {
-        UString fullName = seqName.GetNextName(i);
-        HRESULT result = openVolumeCallback->GetStream(fullName, &curStream);
+        if (!openVolumeCallback)
+          continue;
+        const UString fullName = seqName.GetNextName(i);
+        const HRESULT result = openVolumeCallback->GetStream(fullName, &curStream);
         if (result == S_FALSE)
           continue;
         if (result != S_OK)
@@ -911,17 +888,17 @@ STDMETHODIMP CHandler::Open(IInStream *inStream, const UInt64 *, IArchiveOpenCal
         if (!curStream)
           break;
       }
-
+      
       CHeader header;
       HRESULT res = NWim::ReadHeader(curStream, header, _phySize);
-
+      
       if (res != S_OK)
       {
         if (i != 1 && res == S_FALSE)
           continue;
         return res;
       }
-
+      
       _isArc = true;
       _bootIndex = header.BootIndex;
       _version = header.Version;
@@ -934,7 +911,7 @@ STDMETHODIMP CHandler::Open(IInStream *inStream, const UInt64 *, IArchiveOpenCal
       CWimXml xml;
       xml.VolIndex = header.PartNumber;
       res = _db.OpenXml(curStream, header, xml.Data);
-
+      
       if (res == S_OK)
       {
         if (!xml.Parse())
@@ -952,32 +929,30 @@ STDMETHODIMP CHandler::Open(IInStream *inStream, const UInt64 *, IArchiveOpenCal
           totalFiles = 0;
         res = _db.Open(curStream, header, (unsigned)totalFiles, callback);
       }
-
+      
       if (res != S_OK)
       {
         if (i != 1 && res == S_FALSE)
           continue;
         return res;
       }
-
+      
       while (_volumes.Size() <= header.PartNumber)
         _volumes.AddNew();
       CVolume &volume = _volumes[header.PartNumber];
       volume.Header = header;
       volume.Stream = curStream;
-
+      
       _firstVolumeIndex = header.PartNumber;
-
+      
       if (_xmls.IsEmpty() || xml.Data != _xmls[0].Data)
       {
-        char sz[16];
-        ConvertUInt32ToString(xml.VolIndex, sz);
-        xml.FileName = L'[';
-        xml.FileName.AddAscii(sz);
-        xml.FileName.AddAscii("].xml");
+        xml.FileName = '[';
+        xml.FileName.Add_UInt32(xml.VolIndex);
+        xml.FileName += "].xml";
         _xmls.Add(xml);
       }
-
+      
       if (i == 1)
       {
         if (header.PartNumber != 1)
@@ -997,7 +972,7 @@ STDMETHODIMP CHandler::Open(IInStream *inStream, const UInt64 *, IArchiveOpenCal
 
     RINOK(_db.FillAndCheck(_volumes));
     int defaultImageIndex = (int)_defaultImageNumber - 1;
-
+    
     bool showImageNumber = (_db.Images.Size() != 1 && defaultImageIndex < 0);
     if (!showImageNumber && _set_use_ShowImageNumber)
       showImageNumber = _set_showImageNumber;
@@ -1081,7 +1056,7 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
 
   UInt64 currentTotalUnPacked = 0;
   UInt64 currentItemUnPacked;
-
+  
   int prevSuccessStreamIndex = -1;
 
   CUnpacker unpacker;
@@ -1154,16 +1129,16 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
       continue;
     RINOK(extractCallback->PrepareOperation(askMode));
     Int32 opRes = NExtract::NOperationResult::kOK;
-
+    
     if (streamIndex != prevSuccessStreamIndex || realOutStream)
     {
       Byte digest[kHashSize];
       const CVolume &vol = _volumes[si.PartNumber];
       bool needDigest = !si.IsEmptyHash();
-
+      
       HRESULT res = unpacker.Unpack(vol.Stream, si.Resource, vol.Header, &_db,
           realOutStream, progress, needDigest ? digest : NULL);
-
+      
       if (res == S_OK)
       {
         if (!needDigest || memcmp(digest, si.Hash, kHashSize) == 0)
@@ -1178,11 +1153,11 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
       else
         return res;
     }
-
+    
     realOutStream.Release();
     RINOK(extractCallback->SetOperationResult(opRes));
   }
-
+  
   return S_OK;
   COM_TRY_END
 }
@@ -1233,6 +1208,12 @@ STDMETHODIMP CHandler::SetProperties(const wchar_t * const *names, const PROPVAR
       UInt32 image = 9;
       RINOK(ParsePropToUInt32(L"", prop, image));
       _defaultImageNumber = image;
+    }
+    else if (name.IsPrefixedBy_Ascii_NoCase("mt"))
+    {
+    }
+    else if (name.IsPrefixedBy_Ascii_NoCase("memuse"))
+    {
     }
     else
       return E_INVALIDARG;

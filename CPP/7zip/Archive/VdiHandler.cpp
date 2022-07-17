@@ -11,6 +11,7 @@
 #include "../../Common/MyBuffer.h"
 
 #include "../../Windows/PropVariant.h"
+#include "../../Windows/PropVariantUtils.h"
 
 #include "../Common/RegisterArc.h"
 #include "../Common/StreamUtils.h"
@@ -31,7 +32,18 @@ static const Byte k_Signature[] = SIGNATURE;
 
 static const unsigned k_ClusterBits = 20;
 static const UInt32 k_ClusterSize = (UInt32)1 << k_ClusterBits;
-static const UInt32 k_UnusedCluster = 0xFFFFFFFF;
+
+
+/*
+VDI_IMAGE_BLOCK_FREE = (~0) // returns any random data
+VDI_IMAGE_BLOCK_ZERO = (~1) // returns zeros
+*/
+
+// static const UInt32 k_ClusterType_Free  = 0xffffffff;
+static const UInt32 k_ClusterType_Zero  = 0xfffffffe;
+
+#define IS_CLUSTER_ALLOCATED(v) ((UInt32)(v) < k_ClusterType_Zero)
+
 
 // static const UInt32 kDiskType_Dynamic = 1;
 // static const UInt32 kDiskType_Static = 2;
@@ -41,7 +53,37 @@ static const char * const kDiskTypes[] =
     "0"
   , "Dynamic"
   , "Static"
+  , "Undo"
+  , "Diff"
 };
+
+
+enum EGuidType
+{
+  k_GuidType_Creat,
+  k_GuidType_Modif,
+  k_GuidType_Link,
+  k_GuidType_PModif
+};
+
+static const unsigned kNumGuids = 4;
+static const char * const kGuidNames[kNumGuids] =
+{
+    "Creat "
+  , "Modif "
+  , "Link  "
+  , "PModif"
+};
+
+static bool IsEmptyGuid(const Byte *data)
+{
+  for (unsigned i = 0; i < 16; i++)
+    if (data[i] != 0)
+      return false;
+  return true;
+}
+
+
 
 class CHandler: public CHandlerImg
 {
@@ -52,7 +94,9 @@ class CHandler: public CHandlerImg
   bool _isArc;
   bool _unsupported;
 
-  HRESULT Seek(UInt64 offset)
+  Byte Guids[kNumGuids][16];
+
+  HRESULT Seek2(UInt64 offset)
   {
     _posInArc = offset;
     return Stream->Seek(offset, STREAM_SEEK_SET, NULL);
@@ -61,7 +105,7 @@ class CHandler: public CHandlerImg
   HRESULT InitAndSeek()
   {
     _virtPos = 0;
-    return Seek(0);
+    return Seek2(0);
   }
 
   HRESULT Open2(IInStream *stream, IArchiveOpenCallback *openCallback);
@@ -101,14 +145,14 @@ STDMETHODIMP CHandler::Read(void *data, UInt32 size, UInt32 *processedSize)
     if (cluster < _table.Size())
     {
       const Byte *p = (const Byte *)_table + (size_t)cluster;
-      UInt32 v = Get32(p);
-      if (v != k_UnusedCluster)
+      const UInt32 v = Get32(p);
+      if (IS_CLUSTER_ALLOCATED(v))
       {
         UInt64 offset = _dataOffset + ((UInt64)v << k_ClusterBits);
         offset += lowBits;
         if (offset != _posInArc)
         {
-          RINOK(Seek(offset));
+          RINOK(Seek2(offset));
         }
         HRESULT res = Stream->Read(data, size, &size);
         _posInArc += size;
@@ -137,7 +181,9 @@ static const Byte kProps[] =
 static const Byte kArcProps[] =
 {
   kpidHeadersSize,
-  kpidMethod
+  kpidMethod,
+  kpidComment,
+  kpidName
 };
 
 IMP_IInArchive_Props
@@ -156,16 +202,7 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
     
     case kpidMethod:
     {
-      char s[16];
-      const char *ptr;
-      if (_imageType < ARRAY_SIZE(kDiskTypes))
-        ptr = kDiskTypes[_imageType];
-      else
-      {
-        ConvertUInt32ToString(_imageType, s);
-        ptr = s;
-      }
-      prop = ptr;
+      TYPE_TO_PROP(kDiskTypes, _imageType, prop);
       break;
     }
 
@@ -179,6 +216,42 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
         v = kpv_ErrorFlags_HeadersError;
       if (v != 0)
         prop = v;
+      break;
+    }
+
+    case kpidComment:
+    {
+      AString s;
+      for (unsigned i = 0; i < kNumGuids; i++)
+      {
+        const Byte *guid = Guids[i];
+        if (!IsEmptyGuid(guid))
+        {
+          s.Add_LF();
+          s += kGuidNames[i];
+          s += " : ";
+          char temp[64];
+          RawLeGuidToString_Braced(guid, temp);
+          MyStringLower_Ascii(temp);
+          s += temp;
+        }
+      }
+      if (!s.IsEmpty())
+        prop = s;
+      break;
+    }
+
+    case kpidName:
+    {
+      const Byte *guid = Guids[k_GuidType_Creat];
+      if (!IsEmptyGuid(guid))
+      {
+        char temp[64];
+        RawLeGuidToString_Braced(guid, temp);
+        MyStringLower_Ascii(temp);
+        strcat(temp, ".vdi");
+        prop = temp;
+      }
       break;
     }
   }
@@ -207,15 +280,6 @@ STDMETHODIMP CHandler::GetProperty(UInt32 /* index */, PROPID propID, PROPVARIAN
 }
 
 
-static bool IsEmptyGuid(const Byte *data)
-{
-  for (unsigned i = 0; i < 16; i++)
-    if (data[i] != 0)
-      return false;
-  return true;
-}
-
-
 HRESULT CHandler::Open2(IInStream *stream, IArchiveOpenCallback * /* openCallback */)
 {
   const unsigned kHeaderSize = 512;
@@ -225,45 +289,65 @@ HRESULT CHandler::Open2(IInStream *stream, IArchiveOpenCallback * /* openCallbac
   if (memcmp(buf + 0x40, k_Signature, sizeof(k_Signature)) != 0)
     return S_FALSE;
 
-  UInt32 version = Get32(buf + 0x44);
+  const UInt32 version = Get32(buf + 0x44);
   if (version >= 0x20000)
     return S_FALSE;
+  if (version < 0x10000)
+  {
+    _unsupported = true;
+    return S_FALSE;
+  }
   
-  UInt32 headerSize = Get32(buf + 0x48);
-  if (headerSize < 0x140 || headerSize > 0x1B8)
+  const unsigned kHeaderOffset = 0x48;
+  const unsigned kGuidsOffsets = 0x188;
+  const UInt32 headerSize = Get32(buf + kHeaderOffset);
+  if (headerSize < kGuidsOffsets - kHeaderOffset || headerSize > 0x200 - kHeaderOffset)
     return S_FALSE;
 
   _imageType = Get32(buf + 0x4C);
-  _dataOffset = Get32(buf + 0x158);
+  // Int32 flags = Get32(buf + 0x50);
+  // Byte Comment[0x100]
 
-  UInt32 tableOffset = Get32(buf + 0x154);
+  const UInt32 tableOffset = Get32(buf + 0x154);
   if (tableOffset < 0x200)
     return S_FALSE;
+
+  _dataOffset = Get32(buf + 0x158);
+
+  // UInt32 geometry[3];
   
-  UInt32 sectorSize = Get32(buf + 0x168);
+  const UInt32 sectorSize = Get32(buf + 0x168);
   if (sectorSize != 0x200)
     return S_FALSE;
 
   _size = Get64(buf + 0x170);
+  const UInt32 blockSize = Get32(buf + 0x178);
+  const UInt32 totalBlocks = Get32(buf + 0x180);
+  const UInt32 numAllocatedBlocks = Get32(buf + 0x184);
+  
   _isArc = true;
-
-  if (_imageType > 2)
-  {
-    _unsupported = true;
-    return S_FALSE;
-  }
 
   if (_dataOffset < tableOffset)
     return S_FALSE;
 
-  UInt32 blockSize = Get32(buf + 0x178);
-  if (blockSize != ((UInt32)1 << k_ClusterBits))
+  if (_imageType > 4)
+    _unsupported = true;
+
+  if (blockSize != k_ClusterSize)
   {
     _unsupported = true;
     return S_FALSE;
   }
 
-  UInt32 totalBlocks = Get32(buf + 0x180);
+  if (headerSize >= kGuidsOffsets + kNumGuids * 16 - kHeaderOffset)
+  {
+    for (unsigned i = 0; i < kNumGuids; i++)
+      memcpy(Guids[i], buf + kGuidsOffsets + 16 * i, 16);
+
+    if (!IsEmptyGuid(Guids[k_GuidType_Link]) ||
+        !IsEmptyGuid(Guids[k_GuidType_PModif]))
+      _unsupported = true;
+  }
 
   {
     UInt64 size2 = (UInt64)totalBlocks << k_ClusterBits;
@@ -278,18 +362,6 @@ HRESULT CHandler::Open2(IInStream *stream, IArchiveOpenCallback * /* openCallbac
     */
   }
 
-  if (headerSize >= 0x180)
-  {
-    if (!IsEmptyGuid(buf + 0x1A8) ||
-        !IsEmptyGuid(buf + 0x1B8))
-    {
-      _unsupported = true;
-      return S_FALSE;
-    }
-  }
-
-  UInt32 numAllocatedBlocks = Get32(buf + 0x184);
-
   {
     UInt32 tableReserved = _dataOffset - tableOffset;
     if ((tableReserved >> 2) < totalBlocks)
@@ -298,11 +370,11 @@ HRESULT CHandler::Open2(IInStream *stream, IArchiveOpenCallback * /* openCallbac
 
   _phySize = _dataOffset + ((UInt64)numAllocatedBlocks << k_ClusterBits);
 
-  size_t numBytes = (size_t)totalBlocks * 4;
+  const size_t numBytes = (size_t)totalBlocks * 4;
   if ((numBytes >> 2) != totalBlocks)
   {
     _unsupported = true;
-    return S_FALSE;
+    return E_OUTOFMEMORY;
   }
 
   _table.Alloc(numBytes);
@@ -312,11 +384,14 @@ HRESULT CHandler::Open2(IInStream *stream, IArchiveOpenCallback * /* openCallbac
   const Byte *data = _table;
   for (UInt32 i = 0; i < totalBlocks; i++)
   {
-    UInt32 v = Get32(data + (size_t)i * 4);
-    if (v == k_UnusedCluster)
+    const UInt32 v = Get32(data + (size_t)i * 4);
+    if (!IS_CLUSTER_ALLOCATED(v))
       continue;
     if (v >= numAllocatedBlocks)
+    {
+      _unsupported = true;
       return S_FALSE;
+    }
   }
   
   Stream = stream;
@@ -328,11 +403,14 @@ STDMETHODIMP CHandler::Close()
 {
   _table.Free();
   _phySize = 0;
-  _size = 0;
   _isArc = false;
   _unsupported = false;
 
-  _imgExt = NULL;
+  for (unsigned i = 0; i < kNumGuids; i++)
+    memset(Guids[i], 0, 16);
+
+  // CHandlerImg:
+  Clear_HandlerImg_Vars();
   Stream.Release();
   return S_OK;
 }

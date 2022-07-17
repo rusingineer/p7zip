@@ -10,6 +10,7 @@
 #include "../../Common/MyString.h"
 
 #include "../../Windows/PropVariant.h"
+#include "../../Windows/PropVariantUtils.h"
 
 #include "../Common/InBuffer.h"
 #include "../Common/LimitedStreams.h"
@@ -20,12 +21,20 @@
 
 #include "../Compress/CopyCoder.h"
 #include "../Compress/LzmaDecoder.h"
-#include "../Compress/LzmaEncoder.h"
 #include "../Compress/ZlibDecoder.h"
-#include "../Compress/ZlibEncoder.h"
 
 #include "Common/DummyOutStream.h"
+
+// #define SWF_UPDATE
+
+#ifdef SWF_UPDATE
+
+#include "../Compress/LzmaEncoder.h"
+#include "../Compress/ZlibEncoder.h"
+
 #include "Common/HandlerOut.h"
+ 
+#endif
 
 using namespace NWindows;
 
@@ -45,7 +54,7 @@ static const Byte SWF_COMPRESSED_LZMA = 'Z';
 static const Byte SWF_MIN_COMPRESSED_ZLIB_VER = 6;
 static const Byte SWF_MIN_COMPRESSED_LZMA_VER = 13;
 
-static const Byte kVerLim = 20;
+static const Byte kVerLim = 64;
 
 API_FUNC_static_IsArc IsArc_Swf(const Byte *p, size_t size)
 {
@@ -151,8 +160,10 @@ struct CItem
 class CHandler:
   public IInArchive,
   public IArchiveOpenSeq,
+ #ifdef SWF_UPDATE
   public IOutArchive,
   public ISetProperties,
+ #endif
   public CMyUnknownImp
 {
   CItem _item;
@@ -161,16 +172,22 @@ class CHandler:
   CMyComPtr<ISequentialInStream> _seqStream;
   CMyComPtr<IInStream> _stream;
 
+ #ifdef SWF_UPDATE
   CSingleMethodProps _props;
   bool _lzmaMode;
+  #endif
 
 public:
-  CHandler(): _lzmaMode(false) {}
+ #ifdef SWF_UPDATE
   MY_UNKNOWN_IMP4(IInArchive, IArchiveOpenSeq, IOutArchive, ISetProperties)
-  INTERFACE_IInArchive(;)
+  CHandler(): _lzmaMode(false) {}
   INTERFACE_IOutArchive(;)
-  STDMETHOD(OpenSeq)(ISequentialInStream *stream);
   STDMETHOD(SetProperties)(const wchar_t * const *names, const PROPVARIANT *values, UInt32 numProps);
+ #else
+  MY_UNKNOWN_IMP2(IInArchive, IArchiveOpenSeq)
+ #endif
+  INTERFACE_IInArchive(;)
+  STDMETHOD(OpenSeq)(ISequentialInStream *stream);
 };
 
 static const Byte kProps[] =
@@ -341,7 +358,7 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
   lps->InSize = _item.HeaderSize;
   lps->OutSize = outStreamSpec->GetSize();
   RINOK(lps->SetCur());
-
+  
   CItem item = _item;
   item.MakeUncompressed();
   if (_stream)
@@ -365,7 +382,7 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
        in uncompressed stream.
        What does that data mean ???
        We don't decompress these additional 8 bytes */
-
+    
     // unpackSize = _item.GetSize();
     // SetUi32(item.Buf + 4, (UInt32)(unpackSize + 8));
     CLimitedSequentialInStream *limitedStreamSpec = new CLimitedSequentialInStream;
@@ -414,6 +431,9 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
   return extractCallback->SetOperationResult(opRes);
   COM_TRY_END
 }
+
+
+#ifdef SWF_UPDATE
 
 static HRESULT UpdateArchive(ISequentialOutStream *outStream, UInt64 size,
     bool lzmaMode, const CSingleMethodProps &props,
@@ -473,7 +493,7 @@ static HRESULT UpdateArchive(ISequentialOutStream *outStream, UInt64 size,
   CLocalProgress *lps = new CLocalProgress;
   CMyComPtr<ICompressProgressInfo> progress = lps;
   lps->Init(updateCallback, true);
-
+  
   RINOK(encoder->Code(fileInStream, outStream, NULL, NULL, progress));
   UInt64 inputProcessed;
   if (lzmaMode)
@@ -542,7 +562,7 @@ STDMETHODIMP CHandler::UpdateItems(ISequentialOutStream *outStream, UInt32 numIt
     }
     return UpdateArchive(outStream, size, _lzmaMode, _props, updateCallback);
   }
-
+    
   if (indexInArchive != 0)
     return E_INVALIDARG;
 
@@ -562,25 +582,27 @@ STDMETHODIMP CHandler::SetProperties(const wchar_t * const *names, const PROPVAR
 {
   _lzmaMode = false;
   RINOK(_props.SetProperties(names, values, numProps));
-  AString m = _props.MethodName;
-  m.MakeLower_Ascii();
-  if (m.IsEqualTo("lzma"))
+  const AString &m = _props.MethodName;
+  if (m.IsEqualTo_Ascii_NoCase("lzma"))
   {
     return E_NOTIMPL;
     // _lzmaMode = true;
   }
-  else if (m.IsEqualTo("deflate") || m.IsEmpty())
+  else if (m.IsEqualTo_Ascii_NoCase("Deflate") || m.IsEmpty())
     _lzmaMode = false;
   else
     return E_INVALIDARG;
   return S_OK;
 }
 
+#endif
+
+
 static const Byte k_Signature[] = {
     3, 'C', 'W', 'S',
     3, 'Z', 'W', 'S' };
 
-REGISTER_ARC_IO(
+REGISTER_ARC_I(
   "SWFc", "swf", "~.swf", 0xD8,
   k_Signature,
   0,
@@ -762,12 +784,7 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
     case kpidPackSize:
       prop = (UInt64)tag.Buf.Size(); break;
     case kpidComment:
-      if (tag.Type < ARRAY_SIZE(g_TagDesc))
-      {
-        const char *s = g_TagDesc[tag.Type];
-        if (s != NULL)
-          prop = s;
-      }
+      TYPE_TO_PROP(g_TagDesc, tag.Type, prop);
       break;
   }
   prop.Detach(value);
@@ -781,21 +798,21 @@ STDMETHODIMP CHandler::Open(IInStream *stream, const UInt64 *, IArchiveOpenCallb
 
 static UInt16 Read16(CInBuffer &stream)
 {
-  UInt16 res = 0;
-  for (int i = 0; i < 2; i++)
+  UInt32 res = 0;
+  for (unsigned i = 0; i < 2; i++)
   {
     Byte b;
     if (!stream.ReadByte(b))
       throw 1;
-    res |= (UInt16)b << (i * 8);
+    res |= (UInt32)b << (i * 8);
   }
-  return res;
+  return (UInt16)res;
 }
 
 static UInt32 Read32(CInBuffer &stream)
 {
   UInt32 res = 0;
-  for (int i = 0; i < 4; i++)
+  for (unsigned i = 0; i < 4; i++)
   {
     Byte b;
     if (!stream.ReadByte(b))
@@ -831,7 +848,7 @@ UInt32 CBitReader::ReadBits(unsigned numBits)
       res <<= numBits;
       NumBits -= numBits;
       res |= (Val >> NumBits);
-      Val &= (1 << NumBits) - 1;
+      Val = (Byte)(Val & (((unsigned)1 << NumBits) - 1));
       break;
     }
     else
@@ -854,7 +871,7 @@ HRESULT CHandler::OpenSeq3(ISequentialInStream *stream, IArchiveOpenCallback *ca
   if (uncompressedSize > kFileSizeMax)
     return S_FALSE;
 
-
+  
   CInBuffer s;
   if (!s.Create(1 << 20))
     return E_OUTOFMEMORY;
@@ -962,7 +979,7 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
     RINOK(extractCallback->GetStream(index, &outStream, askMode));
     if (!testMode && !outStream)
       continue;
-
+      
     RINOK(extractCallback->PrepareOperation(askMode));
     if (outStream)
       RINOK(WriteStream(outStream, buf, buf.Size()));

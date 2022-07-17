@@ -24,7 +24,7 @@ struct CRecordingDateTime
   Byte Minute;
   Byte Second;
   signed char GmtOffset; // min intervals from -48 (West) to +52 (East) recorded.
-
+  
   bool GetFileTime(FILETIME &ft) const
   {
     UInt64 value;
@@ -42,13 +42,13 @@ struct CRecordingDateTime
 
 enum EPx
 {
-   k_Px_Mode,
-   k_Px_Links,
-   k_Px_User,
-   k_Px_Group,
-   k_Px_SerialNumber
+  k_Px_Mode,
+  k_Px_Links,
+  k_Px_User,
+  k_Px_Group,
+  k_Px_SerialNumber
 
-   // k_Px_Num
+  // k_Px_Num
 };
 
 /*
@@ -97,6 +97,7 @@ struct CDirRecord
     return (b == 0 || b == 1);
   }
 
+  
   const Byte* FindSuspRecord(unsigned skipSize, Byte id0, Byte id1, unsigned &lenRes) const
   {
     lenRes = 0;
@@ -122,7 +123,7 @@ struct CDirRecord
     return 0;
   }
 
-
+  
   const Byte* GetNameCur(bool checkSusp, int skipSize, unsigned &nameLenRes) const
   {
     const Byte *res = NULL;
@@ -147,7 +148,8 @@ struct CDirRecord
     return res;
   }
 
-  const bool GetSymLink(int skipSize, AString &link) const
+
+  bool GetSymLink(int skipSize, AString &link) const
   {
     link.Empty();
     const Byte *p = NULL;
@@ -175,7 +177,7 @@ struct CDirRecord
         return false;
 
       bool needSlash = false;
-
+      
            if (flags & (1 << 1)) link += "./";
       else if (flags & (1 << 2)) link += "../";
       else if (flags & (1 << 3)) link += '/';
@@ -206,7 +208,7 @@ struct CDirRecord
     return true;
   }
 
-  static const bool GetLe32Be32(const Byte *p, UInt32 &dest)
+  static bool GetLe32Be32(const Byte *p, UInt32 &dest)
   {
     UInt32 v1 = GetUi32(p);
     UInt32 v2 = GetBe32(p + 4);
@@ -219,8 +221,9 @@ struct CDirRecord
   }
 
 
-  const bool GetPx(int skipSize, unsigned pxType, UInt32 &val) const
+  bool GetPx(int skipSize, unsigned pxType, UInt32 &val) const
   {
+    val = 0;
     const Byte *p = NULL;
     unsigned len = 0;
     p = FindSuspRecord(skipSize, 'P', 'X', len);
@@ -234,7 +237,7 @@ struct CDirRecord
   }
 
   /*
-  const bool GetTf(int skipSize, unsigned pxType, CRecordingDateTime &t) const
+  bool GetTf(int skipSize, unsigned pxType, CRecordingDateTime &t) const
   {
     const Byte *p = NULL;
     unsigned len = 0;
@@ -269,7 +272,7 @@ struct CDirRecord
 
     if (len < step)
       return false;
-
+    
     t.Year = p[0];
     t.Month = p[1];
     t.Day = p[2];

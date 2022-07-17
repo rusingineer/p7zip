@@ -48,7 +48,7 @@ STDMETHODIMP COpenCallbackImp::GetProperty(PROPID propID, PROPVARIANT *value)
   else
     switch (propID)
     {
-      case kpidName:  prop = _fileInfo.Name; break;
+      case kpidName:  prop = fs2us(_fileInfo.Name); break;
       case kpidIsDir:  prop = _fileInfo.IsDir(); break;
       case kpidSize:  prop = _fileInfo.Size; break;
       case kpidAttrib:  prop = (UInt32)_fileInfo.Attrib; break;
@@ -63,11 +63,9 @@ STDMETHODIMP COpenCallbackImp::GetProperty(PROPID propID, PROPVARIANT *value)
 
 struct CInFileStreamVol: public CInFileStream
 {
-  int FileNameIndex;
+  unsigned FileNameIndex;
   COpenCallbackImp *OpenCallbackImp;
   CMyComPtr<IArchiveOpenCallback> OpenCallbackRef;
-
-  CInFileStreamVol() : CInFileStream(true) { }
  
   ~CInFileStreamVol()
   {
@@ -104,14 +102,29 @@ STDMETHODIMP COpenCallbackImp::GetStream(const wchar_t *name, IInStream **inStre
   // if (!allowAbsVolPaths)
   if (!IsSafePath(name2))
     return S_FALSE;
-  
+
+  #ifdef _WIN32
+  /* WIN32 allows wildcards in Find() function
+     and doesn't allow wildcard in File.Open()
+     so we can work without the following wildcard check here */
+  if (name2.Find(L'*') >= 0)
+    return S_FALSE;
+  {
+    int startPos = 0;
+    if (name2.IsPrefixedBy_Ascii_NoCase("\\\\?\\"))
+      startPos = 3;
+    if (name2.Find(L'?', startPos) >= 0)
+      return S_FALSE;
+  }
+  #endif
+
   #endif
 
 
   FString fullPath;
   if (!NFile::NName::GetFullPath(_folderPrefix, us2fs(name2), fullPath))
     return S_FALSE;
-  if (!_fileInfo.Find(fullPath,true))
+  if (!_fileInfo.Find_FollowLink(fullPath))
     return S_FALSE;
   if (_fileInfo.IsDir())
     return S_FALSE;
@@ -119,10 +132,7 @@ STDMETHODIMP COpenCallbackImp::GetStream(const wchar_t *name, IInStream **inStre
   CMyComPtr<IInStream> inStreamTemp = inFile;
   if (!inFile->Open(fullPath))
   {
-    DWORD lastError = ::GetLastError();
-    if (lastError == 0)
-      return E_FAIL;
-    return HRESULT_FROM_WIN32(lastError);
+    return GetLastError_noZero_HRESULT();
   }
 
   FileSizes.Add(_fileInfo.Size);

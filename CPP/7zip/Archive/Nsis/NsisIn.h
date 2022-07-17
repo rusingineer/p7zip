@@ -34,6 +34,11 @@ namespace NFlags
   const UInt32 kSilent = 2;
   const UInt32 kNoCrc = 4;
   const UInt32 kForceCrc = 8;
+  // NSISBI fork flags:
+  const UInt32 k_BI_LongOffset = 16;
+  const UInt32 k_BI_ExternalFileSupport = 32;
+  const UInt32 k_BI_ExternalFile = 64;
+  const UInt32 k_BI_IsStubInstaller = 128;
 }
 
 struct CFirstHeader
@@ -58,11 +63,7 @@ struct CBlockHeader
   UInt32 Offset;
   UInt32 Num;
 
-  void Parse(const Byte *p)
-  {
-    Offset = GetUi32(p);
-    Num = GetUi32(p + 4);
-  }
+  void Parse(const Byte *p, unsigned bhoSize);
 };
 
 struct CItem
@@ -159,6 +160,7 @@ public:
   CByteBuffer _data;
   CObjectVector<CItem> Items;
   bool IsUnicode;
+  bool Is64Bit;
 private:
   UInt32 _stringsPos;     // relative to _data
   UInt32 NumStringChars;
@@ -170,11 +172,11 @@ private:
   ENsisType NsisType;
   bool IsNsis200; // NSIS 2.03 and before
   bool IsNsis225; // NSIS 2.25 and before
-  
   bool LogCmdIsEnabled;
   int BadCmd; // -1: no bad command; in another cases lowest bad command id
 
   bool IsPark() const { return NsisType >= k_NsisType_Park1; }
+  bool IsNsis3_OrHigher() const { return NsisType == k_NsisType_Nsis3; }
 
   UInt64 _fileSize;
   
@@ -350,14 +352,19 @@ public:
     return Decoder.Init(_stream, useFilter);
   }
 
+  HRESULT SeekTo(UInt64 pos)
+  {
+    return _stream->Seek(pos, STREAM_SEEK_SET, NULL);
+  }
+
   HRESULT SeekTo_DataStreamOffset()
   {
-    return _stream->Seek(DataStreamOffset, STREAM_SEEK_SET, NULL);
+    return SeekTo(DataStreamOffset);
   }
 
   HRESULT SeekToNonSolidItem(unsigned index)
   {
-    return _stream->Seek(GetPosOfNonSolidItem(index), STREAM_SEEK_SET, NULL);
+    return SeekTo(GetPosOfNonSolidItem(index));
   }
 
   void Clear();
@@ -403,23 +410,23 @@ public:
         s = MultiByteToUnicodeString(APrefixes[item.Prefix]);
       if (s.Len() > 0)
         if (s.Back() != L'\\')
-          s += L'\\';
+          s += '\\';
     }
 
     if (IsUnicode)
     {
       s += item.NameU;
       if (item.NameU.IsEmpty())
-        s += L"file";
+        s += "file";
     }
     else
     {
       s += MultiByteToUnicodeString(item.NameA);
       if (item.NameA.IsEmpty())
-        s += L"file";
+        s += "file";
     }
     
-    const char *kRemoveStr = "$INSTDIR\\";
+    const char * const kRemoveStr = "$INSTDIR\\";
     if (s.IsPrefixedBy_Ascii_NoCase(kRemoveStr))
     {
       s.Delete(0, MyStringLen(kRemoveStr));
@@ -427,7 +434,7 @@ public:
         s.DeleteFrontal(1);
     }
     if (item.IsUninstaller && ExeStub.Size() == 0)
-      s += L".nsis";
+      s += ".nsis";
     return s;
   }
 

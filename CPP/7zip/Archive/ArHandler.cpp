@@ -170,8 +170,8 @@ static bool OctalToNumber32(const char *s, unsigned size, UInt32 &res)
   res = 0;
   char sz[32];
   size = RemoveTailSpaces(sz, s, size);
-  if (size == 0)
-    return true; // some items doesn't contaion any numbers
+  if (size == 0 || strcmp(sz, "-1") == 0)
+    return true; // some items don't contain any numbers
   const char *end;
   UInt64 res64 = ConvertOctStringToUInt64(sz, &end);
   if ((unsigned)(end - sz) != size)
@@ -185,8 +185,8 @@ static bool DecimalToNumber(const char *s, unsigned size, UInt64 &res)
   res = 0;
   char sz[32];
   size = RemoveTailSpaces(sz, s, size);
-  if (size == 0)
-    return true; // some items doesn't contaion any numbers
+  if (size == 0 || strcmp(sz, "-1") == 0)
+    return true; // some items don't contain any numbers
   const char *end;
   res = ConvertStringToUInt64(sz, &end);
   return ((unsigned)(end - sz) == size);
@@ -618,13 +618,15 @@ STDMETHODIMP CHandler::Open(IInStream *stream,
       _items.DeleteFrontal(1);
       for (unsigned i = 0; i < _items.Size(); i++)
         if (_items[i].Name.IsPrefixedBy("data.tar."))
+        {
           if (_mainSubfile < 0)
-            _mainSubfile = i;
+            _mainSubfile = (int)i;
           else
           {
             _mainSubfile = -1;
             break;
           }
+        }
     }
     else
     {
@@ -688,7 +690,7 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
     case kpidShortComment:
     case kpidSubType:
     {
-      AString s = k_TypeExtionsions[(unsigned)_type];
+      AString s (k_TypeExtionsions[(unsigned)_type]);
       if (_subType == kSubType_BSD)
         s += ":BSD";
       prop = s;
@@ -720,7 +722,7 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
       if (item.TextFileIndex >= 0)
         prop = (item.TextFileIndex == 0) ? "1.txt" : "2.txt";
       else
-        prop = (const wchar_t *)NItemName::GetOSName2(MultiByteToUnicodeString(item.Name, CP_OEMCP));
+        prop = (const wchar_t *)NItemName::GetOsPath_Remove_TailSlash(MultiByteToUnicodeString(item.Name, CP_OEMCP));
       break;
     case kpidSize:
     case kpidPackSize:
@@ -845,7 +847,7 @@ STDMETHODIMP CHandler::GetStream(UInt32 index, ISequentialInStream **stream)
 }
 
 REGISTER_ARC_I(
-  "Ar", "ar a deb lib", 0, 0xEC,
+  "Ar", "ar a deb udeb lib", 0, 0xEC,
   kSignature,
   0,
   0,

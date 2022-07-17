@@ -9,7 +9,7 @@
 
 namespace NArchive {
 namespace NTar {
-
+  
 enum EErrorType
 {
   k_ErrorType_OK,
@@ -23,5 +23,5 @@ HRESULT ReadItem(ISequentialInStream *stream, bool &filled, CItemEx &itemInfo, E
 API_FUNC_IsArc IsArc_Tar(const Byte *p, size_t size);
 
 }}
-
+  
 #endif

@@ -20,17 +20,17 @@ static const unsigned kNumHuffPasses = 4;
 
 bool CThreadInfo::Alloc()
 {
-  if (m_BlockSorterIndex == 0)
+  if (!m_BlockSorterIndex)
   {
     m_BlockSorterIndex = (UInt32 *)::BigAlloc(BLOCK_SORT_BUF_SIZE(kBlockSizeMax) * sizeof(UInt32));
-    if (m_BlockSorterIndex == 0)
+    if (!m_BlockSorterIndex)
       return false;
   }
 
-  if (m_Block == 0)
+  if (!m_Block)
   {
     m_Block = (Byte *)::MidAlloc(kBlockSizeMax * 5 + kBlockSizeMax / 10 + (20 << 10));
-    if (m_Block == 0)
+    if (!m_Block)
       return false;
     m_MtfArray = m_Block + kBlockSizeMax;
     m_TempArray = m_MtfArray + kBlockSizeMax * 2 + 2;
@@ -41,9 +41,9 @@ bool CThreadInfo::Alloc()
 void CThreadInfo::Free()
 {
   ::BigFree(m_BlockSorterIndex);
-  m_BlockSorterIndex = 0;
+  m_BlockSorterIndex = NULL;
   ::MidFree(m_Block);
-  m_Block = 0;
+  m_Block = NULL;
 }
 
 #ifndef _7ZIP_ST
@@ -53,15 +53,19 @@ static THREAD_FUNC_DECL MFThread(void *threadCoderInfo)
   return ((CThreadInfo *)threadCoderInfo)->ThreadFunc();
 }
 
-#define RINOK_THREAD(x) { WRes __result_ = (x); if (__result_ != 0) return __result_; }
-
 HRESULT CThreadInfo::Create()
 {
-  RINOK_THREAD(StreamWasFinishedEvent.Create());
-  RINOK_THREAD(WaitingWasStartedEvent.Create());
-  RINOK_THREAD(CanWriteEvent.Create());
-  RINOK_THREAD(Thread.Create(MFThread, this));
-  return S_OK;
+  WRes             wres = StreamWasFinishedEvent.Create();
+  if (wres == 0) { wres = WaitingWasStartedEvent.Create();
+  if (wres == 0) { wres = CanWriteEvent.Create();
+  if (wres == 0)
+  {
+    if (Encoder->_props.Affinity != 0)
+      wres = Thread.Create_With_Affinity(MFThread, this, (CAffinityMask)Encoder->_props.Affinity);
+    else
+      wres = Thread.Create(MFThread, this);
+  }}}
+  return HRESULT_FROM_WIN32(wres);
 }
 
 void CThreadInfo::FinishStream(bool needLeave)
@@ -74,7 +78,7 @@ void CThreadInfo::FinishStream(bool needLeave)
   WaitingWasStartedEvent.Set();
 }
 
-DWORD CThreadInfo::ThreadFunc()
+THREAD_FUNC_RET_TYPE CThreadInfo::ThreadFunc()
 {
   for (;;)
   {
@@ -133,7 +137,7 @@ void CEncProps::Normalize(int level)
   if (NumPasses > kNumPassesMax) NumPasses = kNumPassesMax;
   
   if (BlockSizeMult == (UInt32)(Int32)-1)
-    BlockSizeMult = (level >= 5 ? 9 : (level >= 1 ? level * 2 - 1: 1));
+    BlockSizeMult = (level >= 5 ? 9 : (level >= 1 ? (unsigned)level * 2 - 1: 1));
   if (BlockSizeMult < kBlockSizeMultMin) BlockSizeMult = kBlockSizeMultMin;
   if (BlockSizeMult > kBlockSizeMultMax) BlockSizeMult = kBlockSizeMultMax;
 }
@@ -143,7 +147,7 @@ CEncoder::CEncoder()
   _props.Normalize(-1);
 
   #ifndef _7ZIP_ST
-  ThreadsInfo = 0;
+  ThreadsInfo = NULL;
   m_NumThreadsPrev = 0;
   NumThreads = 1;
   #endif
@@ -157,9 +161,14 @@ CEncoder::~CEncoder()
 
 HRESULT CEncoder::Create()
 {
-  RINOK_THREAD(CanProcessEvent.CreateIfNotCreated());
-  RINOK_THREAD(CanStartWaitingEvent.CreateIfNotCreated());
-  if (ThreadsInfo != 0 && m_NumThreadsPrev == NumThreads)
+  {
+    WRes             wres = CanProcessEvent.CreateIfNotCreated_Reset();
+    if (wres == 0) { wres = CanStartWaitingEvent.CreateIfNotCreated_Reset(); }
+    if (wres != 0)
+      return HRESULT_FROM_WIN32(wres);
+  }
+  
+  if (ThreadsInfo && m_NumThreadsPrev == NumThreads)
     return S_OK;
   try
   {
@@ -167,7 +176,7 @@ HRESULT CEncoder::Create()
     MtMode = (NumThreads > 1);
     m_NumThreadsPrev = NumThreads;
     ThreadsInfo = new CThreadInfo[NumThreads];
-    if (ThreadsInfo == 0)
+    if (!ThreadsInfo)
       return E_OUTOFMEMORY;
   }
   catch(...) { return E_OUTOFMEMORY; }
@@ -199,11 +208,11 @@ void CEncoder::Free()
   {
     CThreadInfo &ti = ThreadsInfo[t];
     if (MtMode)
-      ti.Thread.Wait();
+      ti.Thread.Wait_Close();
     ti.Free();
   }
   delete []ThreadsInfo;
-  ThreadsInfo = 0;
+  ThreadsInfo = NULL;
 }
 #endif
 
@@ -337,7 +346,7 @@ void CThreadInfo::EncodeBlock(const Byte *block, UInt32 blockSize)
         }
         else
           mtfs[mtfArraySize++] = (Byte)(pos + 1);
-        symbolCounts[pos + 1]++;
+        symbolCounts[(size_t)pos + 1]++;
       }
     }
     while (++i < blockSize);
@@ -357,7 +366,7 @@ void CThreadInfo::EncodeBlock(const Byte *block, UInt32 blockSize)
       mtfs[mtfArraySize++] = 0xFF;
       mtfs[mtfArraySize++] = (Byte)(alphaSize - 256);
     }
-    symbolCounts[alphaSize - 1]++;
+    symbolCounts[(size_t)alphaSize - 1]++;
   }
 
   UInt32 numSymbols = 0;
@@ -412,7 +421,7 @@ void CThreadInfo::EncodeBlock(const Byte *block, UInt32 blockSize)
         if (ge > gs + 1 && t != numTables && t != 1 && (((numTables - t) & 1) == 1))
           aFreq -= symbolCounts[--ge];
         
-        Byte *lens = Lens[t - 1];
+        Byte *lens = Lens[(size_t)t - 1];
         unsigned i = 0;
         do
           lens[i] = (Byte)((i >= gs && i < ge) ? 0 : 1);
@@ -507,7 +516,7 @@ void CThreadInfo::EncodeBlock(const Byte *block, UInt32 blockSize)
           WriteBit2(1);
         WriteBit2(0);
         for (; pos > 0; pos--)
-          mtfSel[pos] = mtfSel[pos - 1];
+          mtfSel[pos] = mtfSel[(size_t)pos - 1];
         mtfSel[0] = sel;
       }
       while (++i < numSelectors);
@@ -634,10 +643,13 @@ void CThreadInfo::EncodeBlock2(const Byte *block, UInt32 blockSize, UInt32 numPa
   UInt32 endPos = 0;
   if (numPasses > 1 && blockSize >= (1 << 10))
   {
-    UInt32 blockSize0 = blockSize / 2;
-    for (;(block[blockSize0] == block[blockSize0 - 1] ||
-          block[blockSize0 - 1] == block[blockSize0 - 2]) &&
-          blockSize0 < blockSize; blockSize0++);
+    UInt32 blockSize0 = blockSize / 2; // ????
+    
+    for (; (block[blockSize0] == block[(size_t)blockSize0 - 1]
+            || block[(size_t)blockSize0 - 1] == block[(size_t)blockSize0 - 2])
+          && blockSize0 < blockSize;
+        blockSize0++);
+    
     if (blockSize0 < blockSize)
     {
       EncodeBlock2(block, blockSize0, numPasses - 1);
@@ -742,9 +754,11 @@ HRESULT CEncoder::CodeReal(ISequentialInStream *inStream, ISequentialOutStream *
     CThreadInfo &ti = ThreadsInfo[t];
     if (MtMode)
     {
-      RINOK(ti.StreamWasFinishedEvent.Reset());
-      RINOK(ti.WaitingWasStartedEvent.Reset());
-      RINOK(ti.CanWriteEvent.Reset());
+      WRes             wres = ti.StreamWasFinishedEvent.Reset();
+      if (wres == 0) { wres = ti.WaitingWasStartedEvent.Reset();
+      if (wres == 0) { wres = ti.CanWriteEvent.Reset(); }}
+      if (wres != 0)
+        return HRESULT_FROM_WIN32(wres);
     }
     #else
     CThreadInfo &ti = ThreadsInfo;
@@ -851,6 +865,16 @@ HRESULT CEncoder::SetCoderProperties(const PROPID *propIDs, const PROPVARIANT *c
   {
     const PROPVARIANT &prop = coderProps[i];
     PROPID propID = propIDs[i];
+
+    if (propID == NCoderPropID::kAffinity)
+    {
+      if (prop.vt == VT_UI8)
+        props.Affinity = prop.uhVal.QuadPart;
+      else
+        return E_INVALIDARG;
+      continue;
+    }
+
     if (propID >= NCoderPropID::kReduceSize)
       continue;
     if (prop.vt != VT_UI4)
@@ -860,7 +884,7 @@ HRESULT CEncoder::SetCoderProperties(const PROPID *propIDs, const PROPVARIANT *c
     {
       case NCoderPropID::kNumPasses: props.NumPasses = v; break;
       case NCoderPropID::kDictionarySize: props.BlockSizeMult = v / kBlockSizeStep; break;
-      case NCoderPropID::kLevel: level = v; break;
+      case NCoderPropID::kLevel: level = (int)v; break;
       case NCoderPropID::kNumThreads:
       {
         #ifndef _7ZIP_ST

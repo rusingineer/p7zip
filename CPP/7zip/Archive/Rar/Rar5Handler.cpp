@@ -7,6 +7,7 @@
 
 #include "../../../Common/ComTry.h"
 #include "../../../Common/IntToString.h"
+#include "../../../Common/MyBuffer2.h"
 #include "../../../Common/UTFConvert.h"
 
 #include "../../../Windows/PropVariantUtils.h"
@@ -50,63 +51,69 @@ static const Byte kMarker[kMarkerSize] = SIGNATURE;
 
 static const size_t kCommentSize_Max = (size_t)1 << 16;
 
+
 static const char * const kHostOS[] =
 {
     "Windows"
   , "Unix"
 };
 
-static const CUInt32PCharPair k_ArcFlags[] =
+
+static const char * const k_ArcFlags[] =
 {
-  { 0, "Volume" },
-  { 1, "VolumeField" },
-  { 2, "Solid" },
-  { 3, "Recovery" },
-  { 4, "Lock" }
+    "Volume"
+  , "VolumeField"
+  , "Solid"
+  , "Recovery"
+  , "Lock" // 4
 };
 
 
-
-template <unsigned alignMask>
-struct CAlignedBuffer
+static const char * const k_FileFlags[] =
 {
-  Byte *_buf;
-  Byte *_bufBase;
-  size_t _size;
-
-  CAlignedBuffer(): _buf(NULL), _bufBase(NULL), _size(0) {}
-  ~CAlignedBuffer() { ::MyFree(_bufBase); }
-public:
-  operator       Byte *()       { return _buf; }
-  operator const Byte *() const { return _buf; }
-
-  void AllocAtLeast(size_t size)
-  {
-    if (_buf && _size >= size)
-      return;
-    ::MyFree(_bufBase);
-    _buf = NULL;
-    _size = 0;
-    _bufBase = (Byte *)::MyAlloc(size + alignMask);
-
-    if (_bufBase)
-    {
-      _size = size;
-      // _buf = (Byte *)(((uintptr_t)_bufBase + alignMask) & ~(uintptr_t)alignMask);
-         _buf = (Byte *)(((ptrdiff_t)_bufBase + alignMask) & ~(ptrdiff_t)alignMask);
-    }
-  }
+    "Dir"
+  , "UnixTime"
+  , "CRC"
+  , "UnknownSize"
 };
+
+
+static const char * const g_ExtraTypes[] =
+{
+    "0"
+  , "Crypto"
+  , "Hash"
+  , "Time"
+  , "Version"
+  , "Link"
+  , "UnixOwner"
+  , "Subdata"
+};
+
+
+static const char * const g_LinkTypes[] =
+{
+    "0"
+  , "UnixSymLink"
+  , "WinSymLink"
+  , "WinJunction"
+  , "HardLink"
+  , "FileCopy"
+};
+
+
+static const char g_ExtraTimeFlags[] = { 'u', 'M', 'C', 'A', 'n' };
+
 
 static unsigned ReadVarInt(const Byte *p, size_t maxSize, UInt64 *val)
 {
   *val = 0;
 
-  for (unsigned i = 0; i < maxSize;)
+  for (unsigned i = 0; i < maxSize && i < 10;)
   {
     Byte b = p[i];
-    if (i < 10)
-      *val |= (UInt64)(b & 0x7F) << (7 * i++);
+    *val |= (UInt64)(b & 0x7F) << (7 * i);
+    i++;
     if ((b & 0x80) == 0)
       return i;
   }
@@ -114,7 +121,48 @@ static unsigned ReadVarInt(const Byte *p, size_t maxSize, UInt64 *val)
 }
 
 
-int CItem::FindExtra(unsigned type, unsigned &recordDataSize) const
+bool CLinkInfo::Parse(const Byte *p, unsigned size)
+{
+  const Byte *pStart = p;
+  unsigned num;
+  UInt64 len;
+  num = ReadVarInt(p, size, &Type);  if (num == 0) { return false; }  p += num; size -= num;
+  num = ReadVarInt(p, size, &Flags); if (num == 0) { return false; }  p += num; size -= num;
+  num = ReadVarInt(p, size, &len);   if (num == 0) { return false; }  p += num; size -= num;
+  if (size != len)
+    return false;
+  NameLen = (unsigned)len;
+  NameOffset = (unsigned)(p - pStart);
+  return true;
+}
+
+
+static void AddHex64(AString &s, UInt64 v)
+{
+  char sz[32];
+  sz[0] = '0';
+  sz[1] = 'x';
+  ConvertUInt64ToHex(v, sz + 2);
+  s += sz;
+}
+
+
+static void PrintType(AString &s, const char * const table[], unsigned num, UInt64 val)
+{
+  char sz[32];
+  const char *p = NULL;
+  if (val < num)
+    p = table[(unsigned)val];
+  if (!p)
+  {
+    ConvertUInt64ToString(val, sz);
+    p = sz;
+  }
+  s += p;
+}
+
+
+int CItem::FindExtra(unsigned extraID, unsigned &recordDataSize) const
 {
   recordDataSize = 0;
   size_t offset = 0;
@@ -124,7 +172,7 @@ int CItem::FindExtra(unsigned type, unsigned &recordDataSize) const
     size_t rem = Extra.Size() - offset;
     if (rem == 0)
       return -1;
-
+    
     {
       UInt64 size;
       unsigned num = ReadVarInt(Extra + offset, rem, &size);
@@ -137,8 +185,8 @@ int CItem::FindExtra(unsigned type, unsigned &recordDataSize) const
       rem = (size_t)size;
     }
     {
-      UInt64 type2;
-      unsigned num = ReadVarInt(Extra + offset, rem, &type2);
+      UInt64 id;
+      unsigned num = ReadVarInt(Extra + offset, rem, &id);
       if (num == 0)
         return -1;
       offset += num;
@@ -147,12 +195,12 @@ int CItem::FindExtra(unsigned type, unsigned &recordDataSize) const
       // There was BUG in RAR 5.21- : it stored (size-1) instead of (size)
       // for Subdata record in Service header.
       // That record always was last in bad archives, so we can fix that case.
-      if (type2 == NExtraRecordType::kSubdata
+      if (id == NExtraID::kSubdata
           && RecordType == NHeaderType::kService
           && rem + 1 == Extra.Size() - offset)
         rem++;
 
-      if (type2 == type)
+      if (id == extraID)
       {
         recordDataSize = (unsigned)rem;
         return (int)offset;
@@ -164,18 +212,117 @@ int CItem::FindExtra(unsigned type, unsigned &recordDataSize) const
 }
 
 
+void CItem::PrintInfo(AString &s) const
+{
+  size_t offset = 0;
+
+  for (;;)
+  {
+    size_t rem = Extra.Size() - offset;
+    if (rem == 0)
+      return;
+    
+    {
+      UInt64 size;
+      unsigned num = ReadVarInt(Extra + offset, rem, &size);
+      if (num == 0)
+        return;
+      offset += num;
+      rem -= num;
+      if (size > rem)
+        break;
+      rem = (size_t)size;
+    }
+    {
+      UInt64 id;
+      {
+        unsigned num = ReadVarInt(Extra + offset, rem, &id);
+        if (num == 0)
+          break;
+        offset += num;
+        rem -= num;
+      }
+
+      // There was BUG in RAR 5.21- : it stored (size-1) instead of (size)
+      // for Subdata record in Service header.
+      // That record always was last in bad archives, so we can fix that case.
+      if (id == NExtraID::kSubdata
+          && RecordType == NHeaderType::kService
+          && rem + 1 == Extra.Size() - offset)
+        rem++;
+
+      s.Add_Space_if_NotEmpty();
+      PrintType(s, g_ExtraTypes, ARRAY_SIZE(g_ExtraTypes), id);
+
+      if (id == NExtraID::kTime)
+      {
+        const Byte *p = Extra + offset;
+        UInt64 flags;
+        unsigned num = ReadVarInt(p, rem, &flags);
+        if (num != 0)
+        {
+          s += ':';
+          for (unsigned i = 0; i < ARRAY_SIZE(g_ExtraTimeFlags); i++)
+            if ((flags & ((UInt64)1 << i)) != 0)
+              s += g_ExtraTimeFlags[i];
+          flags &= ~(((UInt64)1 << ARRAY_SIZE(g_ExtraTimeFlags)) - 1);
+          if (flags != 0)
+          {
+            s += '_';
+            AddHex64(s, flags);
+          }
+        }
+      }
+      else if (id == NExtraID::kLink)
+      {
+        CLinkInfo linkInfo;
+        if (linkInfo.Parse(Extra + offset, (unsigned)rem))
+        {
+          s += ':';
+          PrintType(s, g_LinkTypes, ARRAY_SIZE(g_LinkTypes), linkInfo.Type);
+          UInt64 flags = linkInfo.Flags;
+          if (flags != 0)
+          {
+            s += ':';
+            if (flags & NLinkFlags::kTargetIsDir)
+            {
+              s += 'D';
+              flags &= ~((UInt64)NLinkFlags::kTargetIsDir);
+            }
+            if (flags != 0)
+            {
+              s += '_';
+              AddHex64(s, flags);
+            }
+          }
+        }
+      }
+
+      offset += rem;
+    }
+  }
+
+  s.Add_OptSpaced("ERROR");
+}
+
+
 bool CCryptoInfo::Parse(const Byte *p, size_t size)
 {
-  unsigned num = ReadVarInt(p, size, &Algo);
-  if (num == 0) return false; p += num; size -= num;
+  Algo = 0;
+  Flags = 0;
+  Cnt = 0;
 
+  unsigned num = ReadVarInt(p, size, &Algo);
+  if (num == 0) { return false; }  p += num; size -= num;
+  
   num = ReadVarInt(p, size, &Flags);
-  if (num == 0) return false; p += num; size -= num;
+  if (num == 0) { return false; }  p += num; size -= num;
+
+  if (size > 0)
+    Cnt = p[0];
 
   if (size != 1 + 16 + 16 + (unsigned)(IsThereCheck() ? 12 : 0))
     return false;
-
-  Cnt = p[0];
 
   return true;
 }
@@ -184,17 +331,17 @@ bool CCryptoInfo::Parse(const Byte *p, size_t size)
 bool CItem::FindExtra_Version(UInt64 &version) const
 {
   unsigned size;
-  int offset = FindExtra(NExtraRecordType::kVersion, size);
+  int offset = FindExtra(NExtraID::kVersion, size);
   if (offset < 0)
     return false;
   const Byte *p = Extra + (unsigned)offset;
 
   UInt64 flags;
   unsigned num = ReadVarInt(p, size, &flags);
-  if (num == 0) return false; p += num; size -= num;
-
+  if (num == 0) { return false; }  p += num; size -= num;
+  
   num = ReadVarInt(p, size, &version);
-  if (num == 0) return false; p += num; size -= num;
+  if (num == 0) { return false; }  p += num; size -= num;
 
   return size == 0;
 }
@@ -202,26 +349,12 @@ bool CItem::FindExtra_Version(UInt64 &version) const
 bool CItem::FindExtra_Link(CLinkInfo &link) const
 {
   unsigned size;
-  int offset = FindExtra(NExtraRecordType::kLink, size);
+  int offset = FindExtra(NExtraID::kLink, size);
   if (offset < 0)
     return false;
-  const Byte *p = Extra + (unsigned)offset;
-
-  unsigned num = ReadVarInt(p, size, &link.Type);
-  if (num == 0) return false; p += num; size -= num;
-
-  num = ReadVarInt(p, size, &link.Flags);
-  if (num == 0) return false; p += num; size -= num;
-
-  UInt64 len;
-  num = ReadVarInt(p, size, &len);
-  if (num == 0) return false; p += num; size -= num;
-
-  if (size != len)
+  if (!link.Parse(Extra + (unsigned)offset, size))
     return false;
-
-  link.NameLen = (unsigned)len;
-  link.NameOffset = (unsigned)(p - Extra);
+  link.NameOffset += offset;
   return true;
 }
 
@@ -267,15 +400,15 @@ void CItem::Link_to_Prop(unsigned linkType, NWindows::NCOM::CPropVariant &prop) 
   s.SetFrom_CalcLen((const char *)(Extra + link.NameOffset), link.NameLen);
 
   UString unicode;
-  if (ConvertUTF8ToUnicode(s, unicode))
-    prop = NItemName::GetOSName(unicode);
+  ConvertUTF8ToUnicode(s, unicode);
+  prop = NItemName::GetOsPath(unicode);
 }
 
 bool CItem::GetAltStreamName(AString &name) const
 {
   name.Empty();
   unsigned size;
-  int offset = FindExtra(NExtraRecordType::kSubdata, size);
+  int offset = FindExtra(NExtraID::kSubdata, size);
   if (offset < 0)
     return false;
   name.SetFrom_CalcLen((const char *)(Extra + (unsigned)offset), size);
@@ -309,7 +442,7 @@ void CHash::Init(const CItem &item)
 {
   _crc = CRC_INIT_VAL;
   _calcCRC = item.Has_CRC();
-
+  
   _blakeOffset = item.FindExtra_Blake();
   if (_blakeOffset >= 0)
     Blake2sp_Init(&_blake);
@@ -333,7 +466,7 @@ bool CHash::Check(const CItem &item, NCrypto::NRar5::CDecoder *cryptoDecoderSpec
     if (crc != item.CRC)
       return false;
   }
-
+    
   if (_blakeOffset >= 0)
   {
     Byte digest[BLAKE2S_DIGEST_SIZE];
@@ -409,7 +542,7 @@ STDMETHODIMP COutStreamWithHash::Write(const void *data, UInt32 size, UInt32 *pr
 
 class CInArchive
 {
-  CAlignedBuffer<AES_BLOCK_SIZE - 1> _buf;
+  CAlignedBuffer _buf;
   size_t _bufSize;
   size_t _bufPos;
   ISequentialInStream *_stream;
@@ -417,7 +550,7 @@ class CInArchive
   NCrypto::NRar5::CDecoder *m_CryptoDecoderSpec;
   CMyComPtr<ICompressFilter> m_CryptoDecoder;
 
-
+  CLASS_NO_COPY(CInArchive)
 
   HRESULT ReadStream_Check(void *data, size_t size);
 
@@ -430,7 +563,7 @@ public:
 
   UInt64 StreamStartPosition;
   UInt64 Position;
-
+    
   bool ReadVar(UInt64 &val);
 
   struct CHeader
@@ -440,6 +573,8 @@ public:
     size_t ExtraSize;
     UInt64 DataSize;
   };
+
+  CInArchive() {}
 
   HRESULT ReadBlockHeader(CHeader &h);
   bool ReadFileHeader(const CHeader &header, CItem &item);
@@ -451,15 +586,16 @@ public:
   HRESULT Open(IInStream *inStream, const UInt64 *searchHeaderSizeLimit, ICryptoGetTextPassword *getTextPassword,
       CInArcInfo &info);
 };
-
+  
 
 static HRESULT MySetPassword(ICryptoGetTextPassword *getTextPassword, NCrypto::NRar5::CDecoder *cryptoDecoderSpec)
 {
-  CMyComBSTR password;
+  CMyComBSTR_Wipe password;
   RINOK(getTextPassword->CryptoGetTextPassword(&password));
-  AString utf8;
+  AString_Wipe utf8;
   const unsigned kPasswordLen_MAX = 127;
-  UString unicode = (LPCOLESTR)password;
+  UString_Wipe unicode;
+  unicode.SetFromBstr(password);
   if (unicode.Len() > kPasswordLen_MAX)
     unicode.DeleteFrom(kPasswordLen_MAX);
   ConvertUnicodeToUTF8(unicode, utf8);
@@ -498,7 +634,7 @@ HRESULT CInArchive::ReadBlockHeader(CHeader &h)
   const unsigned kBufSize = AES_BLOCK_SIZE + AES_BLOCK_SIZE; // must be >= kStartSize;
   Byte buf[kBufSize];
   unsigned filled;
-
+  
   if (m_CryptoMode)
   {
     RINOK(ReadStream_Check(buf, kBufSize));
@@ -520,7 +656,7 @@ HRESULT CInArchive::ReadBlockHeader(CHeader &h)
     RINOK(ReadStream_Check(buf, kStartSize));
     filled = kStartSize;
   }
-
+  
   UInt64 val;
   unsigned offset = ReadVarInt(buf + 4, 3, &val);
   if (offset == 0)
@@ -532,14 +668,14 @@ HRESULT CInArchive::ReadBlockHeader(CHeader &h)
     if (size < 2)
       return S_FALSE;
   }
-
+  
   size_t allocSize = _bufSize;
   if (m_CryptoMode)
     allocSize = (allocSize + AES_BLOCK_SIZE - 1) & ~(size_t)(AES_BLOCK_SIZE - 1);
   _buf.AllocAtLeast(allocSize);
   if (!(Byte *)_buf)
     return E_OUTOFMEMORY;
-
+  
   memcpy(_buf, buf, filled);
 
   size_t rem = allocSize - filled;
@@ -566,19 +702,19 @@ HRESULT CInArchive::ReadBlockHeader(CHeader &h)
       return S_FALSE;
     h.ExtraSize = (size_t)extraSize;
   }
-
+  
   if (h.Flags & NHeaderFlags::kData)
   {
     if (!ReadVar(h.DataSize))
       return S_FALSE;
   }
-
+  
   return S_OK;
 }
 
 
 /*
-int CInArcInfo::FindExtra(unsigned type, unsigned &recordDataSize) const
+int CInArcInfo::FindExtra(unsigned extraID, unsigned &recordDataSize) const
 {
   recordDataSize = 0;
   size_t offset = 0;
@@ -588,7 +724,7 @@ int CInArcInfo::FindExtra(unsigned type, unsigned &recordDataSize) const
     size_t rem = Extra.Size() - offset;
     if (rem == 0)
       return -1;
-
+    
     {
       UInt64 size;
       unsigned num = ReadVarInt(Extra + offset, rem, &size);
@@ -601,14 +737,14 @@ int CInArcInfo::FindExtra(unsigned type, unsigned &recordDataSize) const
       rem = (size_t)size;
     }
     {
-      UInt64 type2;
-      unsigned num = ReadVarInt(Extra + offset, rem, &type2);
+      UInt64 id;
+      unsigned num = ReadVarInt(Extra + offset, rem, &id);
       if (num == 0)
         return -1;
       offset += num;
       rem -= num;
 
-      if (type2 == type)
+      if (id == extraID)
       {
         recordDataSize = (unsigned)rem;
         return (int)offset;
@@ -658,7 +794,7 @@ HRESULT CInArchive::Open(IInStream *stream, const UInt64 *searchHeaderSizeLimit,
     CInArcInfo &info)
 {
   m_CryptoMode = false;
-
+  
   WrongPassword = false;
   IsArc = false;
   UnexpectedEnd = false;
@@ -690,7 +826,7 @@ HRESULT CInArchive::Open(IInStream *stream, const UInt64 *searchHeaderSizeLimit,
   CHeader h;
   RINOK(ReadBlockHeader(h));
   info.IsEncrypted = false;
-
+  
   if (h.Type == NHeaderType::kArcEncrypt)
   {
     info.IsEncrypted = true;
@@ -699,7 +835,7 @@ HRESULT CInArchive::Open(IInStream *stream, const UInt64 *searchHeaderSizeLimit,
       return E_NOTIMPL;
 
     m_CryptoMode = true;
-
+    
     if (!m_CryptoDecoder)
     {
       m_CryptoDecoderSpec = new NCrypto::NRar5::CDecoder;
@@ -725,14 +861,14 @@ HRESULT CInArchive::Open(IInStream *stream, const UInt64 *searchHeaderSizeLimit,
 
   IsArc = true;
   info.VolNumber = 0;
-
+  
   if (!ReadVar(info.Flags))
     return S_FALSE;
-
+  
   if (info.Flags & NArcFlags::kVolNumber)
     if (!ReadVar(info.VolNumber))
       return S_FALSE;
-
+  
   if (h.ExtraSize != 0)
   {
     if (_bufSize - _bufPos < h.ExtraSize)
@@ -762,7 +898,7 @@ bool CInArchive::ReadFileHeader(const CHeader &header, CItem &item)
   item.UnixMTime = 0;
   item.CRC = 0;
   item.Flags = 0;
-
+  
   item.CommonFlags = (UInt32)header.Flags;
   item.PackSize = header.DataSize;
 
@@ -771,7 +907,7 @@ bool CInArchive::ReadFileHeader(const CHeader &header, CItem &item)
   item.Flags = (UInt32)flags64;
 
   if (!ReadVar(item.Size)) return false;
-
+  
   {
     UInt64 attrib;
     if (!ReadVar(attrib)) return false;
@@ -810,7 +946,7 @@ bool CInArchive::ReadFileHeader(const CHeader &header, CItem &item)
     item.Name.SetFrom_CalcLen((const char *)(_buf + _bufPos), (unsigned)len);
     _bufPos += (unsigned)len;
   }
-
+  
   item.Extra.Free();
   size_t extraSize = header.ExtraSize;
   if (extraSize != 0)
@@ -822,7 +958,7 @@ bool CInArchive::ReadFileHeader(const CHeader &header, CItem &item)
     _bufPos += extraSize;
   }
 
-
+  
   return (_bufPos == _bufSize);
 }
 
@@ -831,7 +967,7 @@ bool CInArchive::ReadFileHeader(const CHeader &header, CItem &item)
 struct CLinkFile
 {
   unsigned Index;
-  unsigned NumLinks;
+  unsigned NumLinks; // the number of links to Data
   CByteBuffer Data;
   HRESULT Res;
   bool crcOK;
@@ -844,9 +980,9 @@ struct CUnpacker
 {
   NCompress::CCopyCoder *copyCoderSpec;
   CMyComPtr<ICompressCoder> copyCoder;
-
+  
   CMyComPtr<ICompressCoder> LzCoders[2];
-  bool NeedClearSolid[2];
+  bool SolidAllowed;
 
   CFilterCoder *filterStreamSpec;
   CMyComPtr<ISequentialInStream> filterStream;
@@ -863,7 +999,7 @@ struct CUnpacker
 
   CLinkFile *linkFile;
 
-  CUnpacker(): linkFile(NULL) { NeedClearSolid[0] = NeedClearSolid[1] = true; }
+  CUnpacker(): linkFile(NULL) { SolidAllowed = false; }
 
   HRESULT Create(DECL_EXTERNAL_CODECS_LOC_VARS const CItem &item, bool isSolid, bool &wrongPassword);
 
@@ -912,11 +1048,11 @@ HRESULT CUnpacker::Create(DECL_EXTERNAL_CODECS_LOC_VARS const CItem &item, bool 
 
     int lzIndex = item.IsService() ? 1 : 0;
     CMyComPtr<ICompressCoder> &lzCoder = LzCoders[lzIndex];
-
+  
     if (!lzCoder)
     {
       const UInt32 methodID = 0x40305;
-      RINOK(CreateCoder(EXTERNAL_CODECS_LOC_VARS methodID, false, lzCoder));
+      RINOK(CreateCoder_Id(EXTERNAL_CODECS_LOC_VARS methodID, false, lzCoder));
       if (!lzCoder)
         return E_NOTIMPL;
     }
@@ -929,7 +1065,7 @@ HRESULT CUnpacker::Create(DECL_EXTERNAL_CODECS_LOC_VARS const CItem &item, bool 
   }
 
   unsigned cryptoSize = 0;
-  int cryptoOffset = item.FindExtra(NExtraRecordType::kCrypto, cryptoSize);
+  int cryptoOffset = item.FindExtra(NExtraID::kCrypto, cryptoSize);
 
   if (cryptoOffset >= 0)
   {
@@ -954,7 +1090,7 @@ HRESULT CUnpacker::Create(DECL_EXTERNAL_CODECS_LOC_VARS const CItem &item, bool 
     }
 
     RINOK(MySetPassword(getTextPassword, cryptoDecoderSpec));
-
+      
     if (!cryptoDecoderSpec->CalcKey_and_CheckPassword())
       wrongPassword = True;
   }
@@ -973,7 +1109,9 @@ HRESULT CUnpacker::Code(const CItem &item, const CItem &lastItem, UInt64 packSiz
   if (method > kLzMethodMax)
     return E_NOTIMPL;
 
-  if (linkFile && !lastItem.Is_UnknownSize())
+  bool needBuf = (linkFile && linkFile->NumLinks != 0);
+
+  if (needBuf && !lastItem.Is_UnknownSize())
   {
     size_t dataSize = (size_t)lastItem.Size;
     if (dataSize != lastItem.Size)
@@ -998,19 +1136,19 @@ HRESULT CUnpacker::Code(const CItem &item, const CItem &lastItem, UInt64 packSiz
   ICompressCoder *commonCoder = (method == 0) ? copyCoder : LzCoders[item.IsService() ? 1 : 0];
 
   outStreamSpec->SetStream(realOutStream);
-  outStreamSpec->Init(lastItem, (linkFile ? (Byte *)linkFile->Data : NULL));
-
-  NeedClearSolid[item.IsService() ? 1 : 0] = false;
+  outStreamSpec->Init(lastItem, (needBuf ? (Byte *)linkFile->Data : NULL));
 
   HRESULT res = S_OK;
   if (packSize != 0 || lastItem.Is_UnknownSize() || lastItem.Size != 0)
   {
     res = commonCoder->Code(inStream, outStream, &packSize,
       lastItem.Is_UnknownSize() ? NULL : &lastItem.Size, progress);
+    if (!item.IsService())
+      SolidAllowed = true;
   }
   else
   {
-    res = res;
+    // res = res;
   }
 
   if (isCryptoMode)
@@ -1023,7 +1161,7 @@ HRESULT CUnpacker::Code(const CItem &item, const CItem &lastItem, UInt64 packSiz
   // if (res == S_OK)
   {
     unsigned cryptoSize = 0;
-    int cryptoOffset = lastItem.FindExtra(NExtraRecordType::kCrypto, cryptoSize);
+    int cryptoOffset = lastItem.FindExtra(NExtraID::kCrypto, cryptoSize);
     NCrypto::NRar5::CDecoder *crypto = NULL;
 
     if (cryptoOffset >= 0)
@@ -1033,7 +1171,7 @@ HRESULT CUnpacker::Code(const CItem &item, const CItem &lastItem, UInt64 packSiz
         if (cryptoInfo.UseMAC())
           crypto = cryptoDecoderSpec;
     }
-
+    
     isCrcOK = outStreamSpec->_hash.Check(lastItem, crypto);
   }
 
@@ -1041,7 +1179,9 @@ HRESULT CUnpacker::Code(const CItem &item, const CItem &lastItem, UInt64 packSiz
   {
     linkFile->Res = res;
     linkFile->crcOK = isCrcOK;
-    if (!lastItem.Is_UnknownSize() && processedSize != lastItem.Size)
+    if (needBuf
+        && !lastItem.Is_UnknownSize()
+        && processedSize != lastItem.Size)
       linkFile->Data.ChangeSize_KeepData((size_t)processedSize, (size_t)processedSize);
   }
 
@@ -1062,7 +1202,7 @@ HRESULT CUnpacker::DecodeToBuf(DECL_EXTERNAL_CODECS_LOC_VARS const CItem &item, 
     return E_NOTIMPL;
 
   HRESULT res = Create(EXTERNAL_CODECS_LOC_VARS item, item.IsSolid(), wrongPassword);
-
+  
   if (res == S_OK)
   {
     if (wrongPassword)
@@ -1083,7 +1223,7 @@ HRESULT CUnpacker::DecodeToBuf(DECL_EXTERNAL_CODECS_LOC_VARS const CItem &item, 
         buffer.CopyFrom(_tempBuf, (size_t)item.Size);
     }
   }
-
+  
   return res;
 }
 
@@ -1131,12 +1271,12 @@ HRESULT CTempBuf::Decode(DECL_EXTERNAL_CODECS_LOC_VARS
     size_t newSize = _offset + packSize;
     if (newSize > _buf.Size())
       _buf.ChangeSize_KeepData(newSize, _offset);
-
+    
     Byte *data = (Byte *)_buf + _offset;
     RINOK(ReadStream_FALSE(inStream, data, packSize));
-
+    
     _offset += packSize;
-
+    
     if (item.IsSplitAfter())
     {
       CHash hash;
@@ -1145,7 +1285,7 @@ HRESULT CTempBuf::Decode(DECL_EXTERNAL_CODECS_LOC_VARS
       _isOK = hash.Check(item, NULL); // RAR5 doesn't use HMAC for packed part
     }
   }
-
+  
   if (_isOK)
   {
     if (!item.IsSplitAfter())
@@ -1190,10 +1330,12 @@ static const Byte kProps[] =
   kpidCRC,
   kpidHostOS,
   kpidMethod,
-
+  kpidCharacts,
   kpidSymLink,
   kpidHardLink,
   kpidCopyLink,
+
+  kpidVolumeIndex
 };
 
 
@@ -1287,8 +1429,8 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
           AString s;
           s.SetFrom_CalcLen((const char *)(const Byte *)cmt, (unsigned)cmt.Size());
           UString unicode;
-          if (ConvertUTF8ToUnicode(s, unicode))
-            prop = unicode;
+          ConvertUTF8ToUnicode(s, unicode);
+          prop = unicode;
         }
       }
       break;
@@ -1303,13 +1445,12 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
       prop = (UInt32)numBlocks;
       break;
     }
-
+    
     case kpidError:
     {
       if (/* &_missingVol || */ !_missingVolName.IsEmpty())
       {
-        UString s;
-        s.SetFromAscii("Missing volume : ");
+        UString s ("Missing volume : ");
         s += _missingVolName;
         prop = s;
       }
@@ -1339,13 +1480,11 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
       {
         if (arcInfo->IsVolume())
         {
-          char sz[32];
-          ConvertUInt64ToString(arcInfo->GetVolIndex() + 1, sz);
-          unsigned len = MyStringLen(sz);
-          AString s = "part";
-          for (; len < 2; len++)
+          AString s ("part");
+          UInt32 v = (UInt32)arcInfo->GetVolIndex() + 1;
+          if (v < 10)
             s += '0';
-          s += sz;
+          s.Add_UInt32(v);
           s += ".rar";
           prop = s;
         }
@@ -1357,7 +1496,7 @@ STDMETHODIMP CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value)
 
   prop.Detach(value);
   return S_OK;
-
+  
   COM_TRY_END
 }
 
@@ -1432,7 +1571,7 @@ STDMETHODIMP CHandler::GetRawProp(UInt32 index, PROPID propID, const void **data
     }
     return S_OK;
   }
-
+  
   if (propID == kpidChecksum)
   {
     int hashRecOffset = item.FindExtra_Blake();
@@ -1444,7 +1583,7 @@ STDMETHODIMP CHandler::GetRawProp(UInt32 index, PROPID propID, const void **data
     }
     return S_OK;
   }
-
+  
   return S_OK;
 }
 
@@ -1452,7 +1591,7 @@ STDMETHODIMP CHandler::GetRawProp(UInt32 index, PROPID propID, const void **data
 static void TimeRecordToProp(const CItem &item, unsigned stampIndex, NCOM::CPropVariant &prop)
 {
   unsigned size;
-  int offset = item.FindExtra(NExtraRecordType::kTime, size);
+  int offset = item.FindExtra(NExtraID::kTime, size);
   if (offset < 0)
     return;
 
@@ -1468,33 +1607,47 @@ static void TimeRecordToProp(const CItem &item, unsigned stampIndex, NCOM::CProp
 
   if ((flags & (NTimeRecord::NFlags::kMTime << stampIndex)) == 0)
     return;
-
+  
   unsigned numStamps = 0;
+  unsigned curStamp = 0;
   unsigned i;
   for (i = 0; i < 3; i++)
     if ((flags & (NTimeRecord::NFlags::kMTime << i)) != 0)
+    {
+      if (i == stampIndex)
+        curStamp = numStamps;
       numStamps++;
-  unsigned stampSizeLog = ((flags & NTimeRecord::NFlags::kUnixTime) != 0) ? 2 : 3;
-
-  if ((numStamps << stampSizeLog) != size)
-    return;
-
-  numStamps = 0;
-  for (i = 0; i < stampIndex; i++)
-    if ((flags & (NTimeRecord::NFlags::kMTime << i)) != 0)
-      numStamps++;
-
-  p += (numStamps << stampSizeLog);
+    }
 
   FILETIME ft;
+  
   if ((flags & NTimeRecord::NFlags::kUnixTime) != 0)
-    NWindows::NTime::UnixTimeToFileTime(Get32(p), ft);
+  {
+    curStamp *= 4;
+    if (curStamp + 4 > size)
+      return;
+    const Byte *p2 = p + curStamp;
+    UInt64 val = NTime::UnixTimeToFileTime64(Get32(p2));
+    numStamps *= 4;
+    if ((flags & NTimeRecord::NFlags::kUnixNs) != 0 && numStamps * 2 <= size)
+    {
+      const UInt32 ns = Get32(p2 + numStamps) & 0x3FFFFFFF;
+      if (ns < 1000000000)
+        val += ns / 100;
+    }
+    ft.dwLowDateTime = (DWORD)val;
+    ft.dwHighDateTime = (DWORD)(val >> 32);
+  }
   else
   {
-    ft.dwLowDateTime = Get32(p);
-    ft.dwHighDateTime = Get32(p + 4);
+    curStamp *= 8;
+    if (curStamp + 8 > size)
+      return;
+    const Byte *p2 = p + curStamp;
+    ft.dwLowDateTime = Get32(p2);
+    ft.dwHighDateTime = Get32(p2 + 4);
   }
-
+  
   prop = ft;
 }
 
@@ -1502,7 +1655,7 @@ static void TimeRecordToProp(const CItem &item, unsigned stampIndex, NCOM::CProp
 STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *value)
 {
   COM_TRY_BEGIN
-
+  
   NCOM::CPropVariant prop;
   const CRefItem &ref = _refs[index];
   const CItem &item = _items[ref.Item];
@@ -1513,7 +1666,7 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
     case kpidPath:
     {
       UString unicodeName;
-
+      
       if (item.Is_STM())
       {
         AString s;
@@ -1528,37 +1681,36 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
         if (name[0] != ':')
           s += ':';
         s += name;
-        if (!ConvertUTF8ToUnicode(s, unicodeName))
-          break;
+        ConvertUTF8ToUnicode(s, unicodeName);
       }
       else
       {
-        if (!ConvertUTF8ToUnicode(item.Name, unicodeName))
-          break;
+        ConvertUTF8ToUnicode(item.Name, unicodeName);
+
         if (item.Version_Defined)
         {
-          wchar_t temp[32];
+          char temp[32];
           // temp[0] = ';';
           // ConvertUInt64ToString(item.Version, temp + 1);
           // unicodeName += temp;
           ConvertUInt64ToString(item.Version, temp);
-          UString s2 = L"[VER]" WSTRING_PATH_SEPARATOR;
+          UString s2 ("[VER]" STRING_PATH_SEPARATOR);
           s2 += temp;
           s2.Add_PathSepar();
           unicodeName.Insert(0, s2);
         }
       }
-
-      NItemName::ConvertToOSName2(unicodeName);
+      
+      NItemName::ReplaceToOsSlashes_Remove_TailSlash(unicodeName);
       prop = unicodeName;
 
       break;
     }
-
+    
     case kpidIsDir: prop = item.IsDir(); break;
     case kpidSize: if (!lastItem.Is_UnknownSize()) prop = lastItem.Size; break;
     case kpidPackSize: prop = GetPackSize(index); break;
-
+    
     case kpidMTime:
     {
       TimeRecordToProp(item, NTimeRecord::k_Index_MTime, prop);
@@ -1594,8 +1746,8 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
         {
           name.DeleteFrontal(1);
           UString unicodeName;
-          if (ConvertUTF8ToUnicode(name, unicodeName))
-            prop = unicodeName;
+          ConvertUTF8ToUnicode(name, unicodeName);
+          prop = unicodeName;
         }
       }
       break;
@@ -1613,6 +1765,18 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
 
     case kpidSplitBefore: prop = item.IsSplitBefore(); break;
     case kpidSplitAfter: prop = lastItem.IsSplitAfter(); break;
+
+    case kpidVolumeIndex:
+    {
+      if (item.VolIndex < _arcs.Size())
+      {
+        const CInArcInfo &arcInfo = _arcs[item.VolIndex].Info;
+        if (arcInfo.IsVolume())
+          prop = (UInt64)arcInfo.GetVolIndex();
+      }
+      break;
+    }
+
     case kpidCRC:
     {
       const CItem *item2 = (lastItem.IsSplitAfter() ? &item : &lastItem);
@@ -1623,7 +1787,7 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
 
     case kpidMethod:
     {
-      char temp[64];
+      char temp[128];
       unsigned algo = item.GetAlgoVersion();
       char *s = temp;
       if (algo != 0)
@@ -1645,16 +1809,28 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
       }
 
       unsigned cryptoSize = 0;
-      int cryptoOffset = item.FindExtra(NExtraRecordType::kCrypto, cryptoSize);
+      int cryptoOffset = item.FindExtra(NExtraID::kCrypto, cryptoSize);
       if (cryptoOffset >= 0)
       {
         s = temp + strlen(temp);
         *s++ = ' ';
-        strcpy(s, "AES:");
+        
         CCryptoInfo cryptoInfo;
-        if (cryptoInfo.Parse(item.Extra + (unsigned)cryptoOffset, cryptoSize))
+       
+        bool isOK = cryptoInfo.Parse(item.Extra + (unsigned)cryptoOffset, cryptoSize);
+        
+        if (cryptoInfo.Algo == 0)
+          s = MyStpCpy(s, "AES");
+        else
         {
+          s = MyStpCpy(s, "Crypto_");
+          ConvertUInt64ToString(cryptoInfo.Algo, s);
           s += strlen(s);
+        }
+
+        if (isOK)
+        {
+          *s++ = ':';
           ConvertUInt32ToString(cryptoInfo.Cnt, s);
           s += strlen(s);
           *s++ = ':';
@@ -1665,6 +1841,35 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
       prop = temp;
       break;
     }
+    
+    case kpidCharacts:
+    {
+      AString s;
+
+      if (item.ACL >= 0)
+      {
+        s.Add_OptSpaced("ACL");
+      }
+
+      UInt32 flags = item.Flags;
+      // flags &= ~(6); // we don't need compression related bits here.
+
+      if (flags != 0)
+      {
+        AString s2 = FlagsToString(k_FileFlags, ARRAY_SIZE(k_FileFlags), flags);
+        if (!s2.IsEmpty())
+        {
+          s.Add_OptSpaced(s2);
+        }
+      }
+
+      item.PrintInfo(s);
+    
+      if (!s.IsEmpty())
+        prop = s;
+      break;
+    }
+
 
     case kpidHostOS:
       if (item.HostOS < ARRAY_SIZE(kHostOS))
@@ -1673,10 +1878,10 @@ STDMETHODIMP CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
         prop = (UInt64)item.HostOS;
       break;
   }
-
+  
   prop.Detach(value);
   return S_OK;
-
+  
   COM_TRY_END
 }
 
@@ -1688,7 +1893,7 @@ static int CompareItemsPaths(const CHandler &handler, unsigned p1, unsigned p2, 
 {
   const CItem &item1 = handler._items[handler._refs[p1].Item];
   const CItem &item2 = handler._items[handler._refs[p2].Item];
-
+  
   if (item1.Version_Defined)
   {
     if (!item2.Version_Defined)
@@ -1756,7 +1961,7 @@ static int FindLink(const CHandler &handler, const CUIntVector &sorted,
 void CHandler::FillLinks()
 {
   unsigned i;
-
+  
   for (i = 0; i < _refs.Size(); i++)
   {
     const CItem &item = _items[_refs[i].Item];
@@ -1766,7 +1971,7 @@ void CHandler::FillLinks()
 
   if (i == _refs.Size())
     return;
-
+  
   CUIntVector sorted;
   for (i = 0; i < _refs.Size(); i++)
   {
@@ -1774,21 +1979,21 @@ void CHandler::FillLinks()
     if (!item.IsDir() && !item.IsService())
       sorted.Add(i);
   }
-
+  
   if (sorted.IsEmpty())
     return;
-
+  
   sorted.Sort(CompareItemsPaths_Sort, (void *)this);
-
+  
   AString link;
-
+  
   for (i = 0; i < _refs.Size(); i++)
   {
     CRefItem &ref = _refs[i];
     const CItem &item = _items[ref.Item];
     if (item.IsDir() || item.IsService() || item.PackSize != 0)
       continue;
-    CItem::CLinkInfo linkInfo;
+    CLinkInfo linkInfo;
     if (!item.FindExtra_Link(linkInfo) || linkInfo.Type != NLinkType::kFileCopy)
       continue;
     link.SetFrom_CalcLen((const char *)(item.Extra + linkInfo.NameOffset), linkInfo.NameLen);
@@ -1817,41 +2022,41 @@ HRESULT CHandler::Open2(IInStream *stream,
 {
   CMyComPtr<IArchiveOpenVolumeCallback> openVolumeCallback;
   CMyComPtr<ICryptoGetTextPassword> getTextPassword;
-
+  
   NRar::CVolumeName seqName;
-
+  
   UInt64 totalBytes = 0;
   UInt64 curBytes = 0;
-
+  
   if (openCallback)
   {
     openCallback->QueryInterface(IID_IArchiveOpenVolumeCallback, (void **)&openVolumeCallback);
     openCallback->QueryInterface(IID_ICryptoGetTextPassword, (void **)&getTextPassword);
   }
-
+  
   CTempBuf tempBuf;
-
+  
   CUnpacker unpacker;
   unpacker.getTextPassword = getTextPassword;
-
+  
   int prevSplitFile = -1;
   int prevMainFile = -1;
-
+  
   bool nextVol_is_Required = false;
 
   CInArchive arch;
-
+  
   for (;;)
   {
     CMyComPtr<IInStream> inStream;
-
+    
     if (_arcs.IsEmpty())
       inStream = stream;
     else
     {
       if (!openVolumeCallback)
         break;
-
+      
       if (_arcs.Size() == 1)
       {
         UString baseName;
@@ -1865,11 +2070,11 @@ HRESULT CHandler::Open2(IInStream *stream,
         if (!seqName.InitName(baseName))
           break;
       }
-
+      
       const UString volName = seqName.GetNextName();
-
+      
       HRESULT result = openVolumeCallback->GetStream(volName, &inStream);
-
+      
       if (result != S_OK && result != S_FALSE)
         return result;
 
@@ -1880,18 +2085,18 @@ HRESULT CHandler::Open2(IInStream *stream,
         break;
       }
     }
-
+    
     UInt64 endPos = 0;
     RINOK(inStream->Seek(0, STREAM_SEEK_CUR, &arch.StreamStartPosition));
     RINOK(inStream->Seek(0, STREAM_SEEK_END, &endPos));
     RINOK(inStream->Seek(arch.StreamStartPosition, STREAM_SEEK_SET, NULL));
-
+    
     if (openCallback)
     {
       totalBytes += endPos;
       RINOK(openCallback->SetTotal(NULL, &totalBytes));
     }
-
+    
     CInArcInfo arcInfoOpen;
     {
     HRESULT res = arch.Open(inStream, maxCheckStartPosition, getTextPassword, arcInfoOpen);
@@ -1901,7 +2106,7 @@ HRESULT CHandler::Open2(IInStream *stream,
     {
       _isArc = arch.IsArc;
     }
-
+    
     if (res != S_OK)
     {
       if (res != S_FALSE)
@@ -1911,18 +2116,18 @@ HRESULT CHandler::Open2(IInStream *stream,
       break;
     }
     }
-
+    
     CArc &arc = _arcs.AddNew();
     CInArcInfo &arcInfo = arc.Info;
     arcInfo = arcInfoOpen;
     arc.Stream = inStream;
-
+    
     CItem item;
-
+    
     for (;;)
     {
       item.Clear();
-
+      
       arcInfo.EndPos = arch.Position;
 
       if (arch.Position > endPos)
@@ -1930,9 +2135,9 @@ HRESULT CHandler::Open2(IInStream *stream,
         _errorFlags |= kpv_ErrorFlags_UnexpectedEnd;
         break;
       }
-
+      
       RINOK(inStream->Seek(arch.Position, STREAM_SEEK_SET, NULL));
-
+      
       {
         CInArchive::CHeader h;
         HRESULT res = arch.ReadBlockHeader(h);
@@ -1952,7 +2157,7 @@ HRESULT CHandler::Open2(IInStream *stream,
             _errorFlags |= kpv_ErrorFlags_HeadersError;
           break;
         }
-
+        
         if (h.Type == NHeaderType::kEndOfArc)
         {
           arcInfo.EndPos = arch.Position;
@@ -1973,26 +2178,26 @@ HRESULT CHandler::Open2(IInStream *stream,
           }
           break;
         }
-
+        
         if (h.Type != NHeaderType::kFile &&
             h.Type != NHeaderType::kService)
         {
           _errorFlags |= kpv_ErrorFlags_UnsupportedFeature;
           break;
         }
-
+        
         item.RecordType = (Byte)h.Type;
-
+        
         if (!arch.ReadFileHeader(h, item))
         {
           _errorFlags |= kpv_ErrorFlags_HeadersError;
           break;
         }
-
+        
         // item.MainPartSize = (UInt32)(Position - item.Position);
         item.DataPos = arch.Position;
       }
-
+      
       bool isOk_packSize = true;
       {
         arcInfo.EndPos = arch.Position;
@@ -2011,7 +2216,7 @@ HRESULT CHandler::Open2(IInStream *stream,
       }
 
       bool needAdd = true;
-
+      
       {
         if (_comment.Size() == 0
             && item.Is_CMT()
@@ -2025,7 +2230,7 @@ HRESULT CHandler::Open2(IInStream *stream,
           needAdd = false;
         }
       }
-
+      
       if (needAdd)
       {
         CRefItem ref;
@@ -2033,7 +2238,7 @@ HRESULT CHandler::Open2(IInStream *stream,
         ref.Last = ref.Item;
         ref.Parent = -1;
         ref.Link = -1;
-
+        
         if (item.IsService())
         {
           if (item.Is_STM())
@@ -2049,7 +2254,7 @@ HRESULT CHandler::Open2(IInStream *stream,
               if (prevMainFile >= 0 && item.Size < (1 << 24) && item.Size != 0)
               {
                 CItem &mainItem = _items[_refs[prevMainFile].Item];
-
+                
                 if (mainItem.ACL < 0)
                 {
                   CByteBuffer acl;
@@ -2063,7 +2268,7 @@ HRESULT CHandler::Open2(IInStream *stream,
                       return res;
                   }
                   // RINOK();
-
+                  
                   if (res == S_OK && acl.Size() != 0)
                   {
                     if (_acls.IsEmpty() || acl != _acls.Back())
@@ -2075,7 +2280,7 @@ HRESULT CHandler::Open2(IInStream *stream,
             }
           }
         }
-
+        
         if (needAdd)
         {
           if (item.IsSplitBefore())
@@ -2093,7 +2298,7 @@ HRESULT CHandler::Open2(IInStream *stream,
             }
           }
         }
-
+        
         if (needAdd)
         {
           if (item.IsSplitAfter())
@@ -2103,7 +2308,7 @@ HRESULT CHandler::Open2(IInStream *stream,
           _refs.Add(ref);
         }
       }
-
+      
       {
         UInt64 version;
         if (item.FindExtra_Version(version))
@@ -2112,10 +2317,10 @@ HRESULT CHandler::Open2(IInStream *stream,
           item.Version = version;
         }
       }
-
+      
       item.VolIndex = _arcs.Size() - 1;
       _items.Add(item);
-
+      
       if (openCallback && (_items.Size() & 0xFF) == 0)
       {
         UInt64 numFiles = _items.Size();
@@ -2126,7 +2331,7 @@ HRESULT CHandler::Open2(IInStream *stream,
       if (!isOk_packSize)
         break;
     }
-
+      
     curBytes += endPos;
 
     nextVol_is_Required = false;
@@ -2255,7 +2460,7 @@ STDMETHODIMP CVolsInStream::Read(void *data, UInt32 size, UInt32 *processedSize)
         return S_OK;
     }
   }
-
+  
   return S_OK;
 }
 
@@ -2296,7 +2501,7 @@ static HRESULT CopyData_with_Progress(const Byte *data, size_t size,
     ISequentialOutStream *outStream, ICompressProgressInfo *progress)
 {
   size_t pos = 0;
-
+  
   while (pos < size)
   {
     const UInt32 kStepSize = ((UInt32)1 << 24);
@@ -2317,7 +2522,7 @@ static HRESULT CopyData_with_Progress(const Byte *data, size_t size,
       RINOK(progress->SetRatioInfo(&pos64, &pos64));
     }
   }
-
+  
   return S_OK;
 }
 
@@ -2332,7 +2537,7 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
     numItems = _refs.Size();
   if (numItems == 0)
     return S_OK;
-
+  
   CByteArr extractStatuses(_refs.Size());
   memset(extractStatuses, 0, _refs.Size());
 
@@ -2342,6 +2547,15 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
   const Byte kStatus_Extract = 1 << 0;
   const Byte kStatus_Skip = 1 << 1;
   const Byte kStatus_Link = 1 << 2;
+
+  /*
+    In original RAR:
+    1) service streams are not allowed to be solid,
+        and solid flag must be ignored for service streams.
+    2) If RAR creates new solid block and first file in solid block is Link file,
+         then it can clear solid flag for Link file and
+         clear solid flag for first non-Link file after Link file.
+  */
 
   CObjectVector<CLinkFile> linkFiles;
 
@@ -2358,23 +2572,25 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
         const CRefItem &ref = _refs[index];
         const CItem &item = _items[ref.Item];
         const CItem &lastItem = _items[ref.Last];
-
+        
         extractStatuses[index] |= kStatus_Extract;
 
         if (!lastItem.Is_UnknownSize())
           total += lastItem.Size;
         else
           isThereUndefinedSize = true;
-
+        
         if (ref.Link >= 0)
         {
-          if (!testMode)
+          // 18.06 fixed: we use links for Test mode too
+          // if (!testMode)
           {
             if ((unsigned)ref.Link < index)
             {
               const CRefItem &linkRef = _refs[(unsigned)ref.Link];
               const CItem &linkItem = _items[linkRef.Item];
-              if (linkItem.IsSolid() && linkItem.Size <= k_CopyLinkFile_MaxSize)
+              if (linkItem.IsSolid())
+              if (testMode || linkItem.Size <= k_CopyLinkFile_MaxSize)
               {
                 if (extractStatuses[(unsigned)ref.Link] == 0)
                 {
@@ -2391,14 +2607,14 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
           }
           continue;
         }
-
+        
         if (item.IsService())
           continue;
-
+        
         if (item.IsSolid())
         {
           unsigned j = index;
-
+          
           while (j > solidLimit)
           {
             j--;
@@ -2420,7 +2636,7 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
             }
           }
         }
-
+        
         solidLimit = index + 1;
       }
     }
@@ -2429,23 +2645,29 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
     {
       unsigned solidLimit = 0;
 
-      FOR_VECTOR(i, _refs)
+      FOR_VECTOR (i, _refs)
       {
         if ((extractStatuses[i] & kStatus_Link) == 0)
           continue;
+
+        // We use CLinkFile for testMode too.
+        // So we can show errors for copy files.
+        // if (!testMode)
+        {
+          CLinkFile &linkFile = linkFiles.AddNew();
+          linkFile.Index = i;
+        }
+
         const CItem &item = _items[_refs[i].Item];
         /*
         if (item.IsService())
           continue;
         */
-
-        CLinkFile &linkFile = linkFiles.AddNew();
-        linkFile.Index = i;
-
+        
         if (item.IsSolid())
         {
           unsigned j = i;
-
+          
           while (j > solidLimit)
           {
             j--;
@@ -2468,15 +2690,16 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
             }
           }
         }
-
+        
         solidLimit = i + 1;
       }
 
+      if (!testMode)
       for (UInt32 t = 0; t < numItems; t++)
       {
         unsigned index = allFilesMode ? t : indices[t];
         const CRefItem &ref = _refs[index];
-
+       
         int linkIndex = ref.Link;
         if (linkIndex < 0 || (unsigned)linkIndex >= index)
           continue;
@@ -2489,7 +2712,7 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
         linkFiles[bufIndex].NumLinks++;
       }
     }
-
+    
     if (total != 0 || !isThereUndefinedSize)
     {
       RINOK(extractCallback->SetTotal(total));
@@ -2513,7 +2736,7 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
 
   // bool needClearSolid = true;
 
-  FOR_VECTOR(i, _refs)
+  FOR_VECTOR (i, _refs)
   {
     if (extractStatuses[i] == 0)
       continue;
@@ -2523,18 +2746,22 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
     lps->InSize = totalPacked;
     lps->OutSize = totalUnpacked;
     RINOK(lps->SetCur());
-
+    
     CMyComPtr<ISequentialOutStream> realOutStream;
 
+    // isExtract means that we don't skip that item. So we need read data.
+
+    bool isExtract = ((extractStatuses[i] & kStatus_Extract) != 0);
     Int32 askMode =
-        ((extractStatuses[i] & kStatus_Extract) != 0) ? (testMode ?
+        isExtract ? (testMode ?
           NExtract::NAskMode::kTest :
           NExtract::NAskMode::kExtract) :
           NExtract::NAskMode::kSkip;
 
     unpacker.linkFile = NULL;
 
-    if (((extractStatuses[i] & kStatus_Link) != 0))
+    // if (!testMode)
+    if ((extractStatuses[i] & kStatus_Link) != 0)
     {
       int bufIndex = FindLinkBuf(linkFiles, i);
       if (bufIndex < 0)
@@ -2556,13 +2783,12 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
 
     RINOK(extractCallback->GetStream(index, &realOutStream, askMode));
 
-    bool isSolid;
+    bool isSolid = false;
+    if (!item->IsService())
     {
-      bool &needClearSolid = unpacker.NeedClearSolid[item->IsService() ? 1 : 0];
-      isSolid = (item->IsSolid() && !needClearSolid);
-      if (item->IsService())
-        isSolid = false;
-      needClearSolid = !item->IsSolid();
+      if (item->IsSolid())
+        isSolid = unpacker.SolidAllowed;
+      unpacker.SolidAllowed = isSolid;
     }
 
     if (item->IsDir())
@@ -2591,9 +2817,14 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
           curUnpackSize = 0;
         curPackSize = GetPackSize(index2);
       }
-      else if ((unsigned)index2 < index)
-        bufIndex = FindLinkBuf(linkFiles, index2);
+      else
+      {
+        if ((unsigned)index2 < index)
+          bufIndex = FindLinkBuf(linkFiles, index2);
+      }
     }
+
+    bool needCallback = true;
 
     if (!realOutStream)
     {
@@ -2601,8 +2832,15 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
       {
         if (item->NeedUse_as_CopyLink_or_HardLink())
         {
+          Int32 opRes = NExtract::NOperationResult::kOK;
+          if (bufIndex >= 0)
+          {
+            const CLinkFile &linkFile = linkFiles[bufIndex];
+            opRes = DecoderRes_to_OpRes(linkFile.Res, linkFile.crcOK);
+          }
+
           RINOK(extractCallback->PrepareOperation(askMode));
-          RINOK(extractCallback->SetOperationResult(NExtract::NOperationResult::kOK));
+          RINOK(extractCallback->SetOperationResult(opRes));
           continue;
         }
       }
@@ -2611,10 +2849,10 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
         if (item->IsService())
           continue;
 
-        if (item->NeedUse_as_HardLink())
-          continue;
+        needCallback = false;
 
-        bool needDecode = false;
+        if (!item->NeedUse_as_HardLink())
+        if (index2 < 0)
 
         for (unsigned n = i + 1; n < _refs.Size(); n++)
         {
@@ -2625,41 +2863,56 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
             break;
           if (extractStatuses[i] != 0)
           {
-            needDecode = true;
+            needCallback = true;
             break;
           }
         }
-
-        if (!needDecode)
-          continue;
-
+        
         askMode = NExtract::NAskMode::kSkip;
       }
     }
 
-    RINOK(extractCallback->PrepareOperation(askMode));
+    if (needCallback)
+    {
+      RINOK(extractCallback->PrepareOperation(askMode));
+    }
 
     if (bufIndex >= 0)
     {
       CLinkFile &linkFile = linkFiles[bufIndex];
-      if (linkFile.NumLinks == 0)
-        return E_FAIL;
-      if (realOutStream)
+     
+      if (isExtract)
       {
-        RINOK(CopyData_with_Progress(linkFile.Data, linkFile.Data.Size(), realOutStream, progress));
+        if (linkFile.NumLinks == 0)
+          return E_FAIL;
+       
+        if (needCallback)
+        if (realOutStream)
+        {
+          RINOK(CopyData_with_Progress(linkFile.Data, linkFile.Data.Size(), realOutStream, progress));
+        }
+      
+        if (--linkFile.NumLinks == 0)
+          linkFile.Data.Free();
       }
-      if (--linkFile.NumLinks == 0)
-        linkFile.Data.Free();
-      RINOK(extractCallback->SetOperationResult(DecoderRes_to_OpRes(linkFile.Res, linkFile.crcOK)));
+      
+      if (needCallback)
+      {
+        RINOK(extractCallback->SetOperationResult(DecoderRes_to_OpRes(linkFile.Res, linkFile.crcOK)));
+      }
       continue;
     }
 
+    if (!needCallback)
+      continue;
+    
     if (item->NeedUse_as_CopyLink())
     {
-      RINOK(extractCallback->SetOperationResult(
-          realOutStream ?
-            NExtract::NOperationResult::kUnsupportedMethod:
-            NExtract::NOperationResult::kOK));
+      int opRes = realOutStream ?
+          NExtract::NOperationResult::kUnsupportedMethod:
+          NExtract::NOperationResult::kOK;
+      realOutStream.Release();
+      RINOK(extractCallback->SetOperationResult(opRes));
       continue;
     }
 
@@ -2680,7 +2933,7 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
       RINOK(extractCallback->SetOperationResult(NExtract::NOperationResult::kWrongPassword));
       continue;
     }
-
+        
     bool crcOK = true;
     if (result == S_OK)
       result = unpacker.Code(*item, _items[ref->Last], packSize, volsInStream, realOutStream, progress, crcOK);
@@ -2706,13 +2959,13 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
   }
 
   {
-    FOR_VECTOR(i, linkFiles)
+    FOR_VECTOR (i, linkFiles)
       if (linkFiles[i].NumLinks != 0)
         return E_FAIL;
   }
 
   return S_OK;
-
+  
   COM_TRY_END
 }
 

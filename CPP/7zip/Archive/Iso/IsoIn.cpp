@@ -47,18 +47,14 @@ bool CBootInitialEntry::Parse(const Byte *p)
 
 AString CBootInitialEntry::GetName() const
 {
-  AString s = (Bootable ? "Boot" : "NotBoot");
+  AString s (Bootable ? "Boot" : "NotBoot");
   s += '-';
-
+  
   if (BootMediaType < ARRAY_SIZE(kMediaTypes))
     s += kMediaTypes[BootMediaType];
   else
-  {
-    char name[16];
-    ConvertUInt32ToString(BootMediaType, name);
-    s += name;
-  }
-
+    s.Add_UInt32(BootMediaType);
+  
   if (VendorSpec[0] == 1)
   {
     // "Language and Version Information (IBM)"
@@ -184,7 +180,7 @@ UInt32 CInArchive::ReadDigits(int numDigits)
     Byte b = ReadByte();
     if (b < '0' || b > '9')
     {
-      if (b == 0) // it's bug in some CD's
+      if (b == 0 || b == ' ') // it's bug in some CD's
         b = '0';
       else
         throw CHeaderErrorException();
@@ -242,7 +238,7 @@ void CInArchive::ReadDirRecord2(CDirRecord &r, Byte len)
   r.FileId.Alloc(idLen);
   ReadBytes((Byte *)r.FileId, idLen);
   unsigned padSize = 1 - (idLen & 1);
-
+  
   // SkipZeros(padSize);
   Skip(padSize); // it's bug in some cd's. Must be zeros
 
@@ -303,10 +299,12 @@ void CInArchive::ReadVolumeDescriptor(CVolumeDescriptor &d)
 
 static const Byte kSig_CD001[5] = { 'C', 'D', '0', '0', '1' };
 
+/*
 static const Byte kSig_NSR02[5] = { 'N', 'S', 'R', '0', '2' };
 static const Byte kSig_NSR03[5] = { 'N', 'S', 'R', '0', '3' };
 static const Byte kSig_BEA01[5] = { 'B', 'E', 'A', '0', '1' };
 static const Byte kSig_TEA01[5] = { 'T', 'E', 'A', '0', '1' };
+*/
 
 static inline bool CheckSignature(const Byte *sig, const Byte *data)
 {
@@ -362,7 +360,7 @@ void CInArchive::ReadDir(CDir &d, int level)
     ReadDirRecord2(subItem, len);
     if (firstItem && level == 0)
       IsSusp = subItem.CheckSusp(SuspSkipSize);
-
+      
     if (!subItem.IsSystemItem())
       d._subItems.Add(subItem);
 
@@ -419,10 +417,10 @@ void CInArchive::ReadBootInfo()
 
   if (memcmp(_bootDesc.BootSystemId, kElToritoSpec, sizeof(_bootDesc.BootSystemId)) != 0)
     return;
-
+  
   UInt32 blockIndex = GetUi32(_bootDesc.BootSystemUse);
   SeekToBlock(blockIndex);
-
+  
   Byte buf[32];
   ReadBytes(buf, 32);
 
@@ -456,7 +454,7 @@ void CInArchive::ReadBootInfo()
   }
 
   bool error = false;
-
+  
   for (;;)
   {
     ReadBytes(buf, 32);
@@ -469,7 +467,7 @@ void CInArchive::ReadBootInfo()
     // Byte platform = p[1];
     unsigned numEntries = GetUi16(buf + 2);
     // id[28]
-
+      
     for (unsigned i = 0; i < numEntries; i++)
     {
       ReadBytes(buf, 32);
@@ -497,11 +495,11 @@ void CInArchive::ReadBootInfo()
       }
       BootEntries.Add(e);
     }
-
+  
     if (headerIndicator != NBootEntryId::kMoreHeaders)
       break;
   }
-
+    
   HeadersError = error;
 }
 
@@ -516,13 +514,13 @@ HRESULT CInArchive::Open2()
   PhySize = _position;
   m_BufferPos = 0;
   // BlockSize = kBlockSize;
-
+  
   for (;;)
   {
     Byte sig[7];
     ReadBytes(sig, 7);
     Byte ver = sig[6];
-
+    
     if (!CheckSignature(kSig_CD001, sig + 1))
     {
       return S_FALSE;
@@ -545,7 +543,7 @@ HRESULT CInArchive::Open2()
       continue;
       */
     }
-
+    
     // version = 2 for ISO 9660:1999?
     if (ver > 2)
       return S_FALSE;
@@ -556,7 +554,7 @@ HRESULT CInArchive::Open2()
       // Skip(0x800 - 7);
       // continue;
     }
-
+    
     switch (sig[0])
     {
       case NVolDescType::kBootRecord:
@@ -583,7 +581,7 @@ HRESULT CInArchive::Open2()
         break;
     }
   }
-
+  
   if (VolDescs.IsEmpty())
     return S_FALSE;
   for (MainVolDescIndex = VolDescs.Size() - 1; MainVolDescIndex > 0; MainVolDescIndex--)
@@ -593,7 +591,7 @@ HRESULT CInArchive::Open2()
   const CVolumeDescriptor &vd = VolDescs[MainVolDescIndex];
   if (vd.LogicalBlockSize != kBlockSize)
     return S_FALSE;
-
+  
   IsArc = true;
 
   (CDirRecord &)_rootDir = vd.RootDirRecord;

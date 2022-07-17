@@ -23,14 +23,14 @@
     ((UInt32)((const Byte *)(p))[1] <<  8) | \
              ((const Byte *)(p))[2] )
 
-#define Get16(p) GetBe16(p)
+// #define Get16(p) GetBe16(p)
 #define Get24(p) GetBe24(p)
 #define Get32(p) GetBe32(p)
 
 namespace NArchive {
 namespace NFlv {
 
-static const UInt32 kFileSizeMax = (UInt32)1 << 30;
+// static const UInt32 kFileSizeMax = (UInt32)1 << 30;
 static const UInt32 kNumChunksMax = (UInt32)1 << 23;
 
 static const UInt32 kTagHeaderSize = 11;
@@ -282,7 +282,7 @@ HRESULT CHandler::Open2(IInStream *stream, IArchiveOpenCallback *callback)
   if (offset != 9 || Get32(header + 9) != 0)
     return S_FALSE;
   offset = kHeaderSize;
-
+ 
   CInBuffer inBuf;
   if (!inBuf.Create(1 << 15))
     return E_OUTOFMEMORY;
@@ -322,7 +322,7 @@ HRESULT CHandler::Open2(IInStream *stream, IArchiveOpenCallback *callback)
       break;
 
     offset += curSize;
-
+    
     // printf("\noffset = %6X type = %2d time = %6d size = %6d", (UInt32)offset, item.Type, item.Time, item.Size);
 
     if (item.Type == kType_Meta)
@@ -472,7 +472,7 @@ STDMETHODIMP CHandler::Extract(const UInt32 *indices, UInt32 numItems,
   extractCallback->SetTotal(totalSize);
 
   totalSize = 0;
-
+  
   CLocalProgress *lps = new CLocalProgress;
   CMyComPtr<ICompressProgressInfo> progress = lps;
   lps->Init(extractCallback, false);
